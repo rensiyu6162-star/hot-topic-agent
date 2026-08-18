@@ -1,0 +1,17 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+
+node_modules
+.next
+out
+dist
+*.local
+.env.local
+.env
+
+# Editor
+.vscode
+.idea
+*.sw?
