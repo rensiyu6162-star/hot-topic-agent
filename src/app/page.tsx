@@ -8,7 +8,7 @@ interface Message {
   toolLogs?: string[];
 }
 
-const PLATFORMS = ["微博", "知乎", "B站", "抖音", "小红书", "快手", "头条"];
+const PLATFORMS = ["微博", "知乎", "B站", "抖音", "小红书", "快手", "头条", "百度"];
 const DOMAINS = ["科技数码", "职场成长", "美食探店", "娱乐八卦", "财经理财", "健康养生", "教育学习", "旅行出行"];
 
 export default function Home() {

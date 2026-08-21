@@ -253,6 +253,21 @@ async function fetchToutiaoHot(): Promise<any[]> {
   ], "头条热榜暂时无法获取，建议稍后重试");
 }
 
+async function fetchBaiduHot(): Promise<any[]> {
+  return tryFetchSources([
+    async () => {
+      // 源1：本地 DailyHotApi
+      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/baidu`);
+      const json = await res.json();
+      const list = json?.data || [];
+      if (list.length === 0) throw new Error("empty");
+      return list.slice(0, 20).map((item: any, i: number) => ({
+        rank: i + 1, title: item.title, hot: item.hot || 0, url: item.url || "",
+      }));
+    },
+  ], "百度热搜暂时无法获取，建议稍后重试");
+}
+
 const PLATFORM_FETCHERS: Record<string, () => Promise<any[]>> = {
   微博: fetchWeiboHot,
   知乎: fetchZhihuHot,
@@ -261,6 +276,7 @@ const PLATFORM_FETCHERS: Record<string, () => Promise<any[]>> = {
   小红书: fetchXiaohongshuHot,
   快手: fetchKuaishouHot,
   头条: fetchToutiaoHot,
+  百度: fetchBaiduHot,
 };
 
 // ========== Tools Definition ==========
@@ -276,7 +292,7 @@ const TOOLS = [
         properties: {
           platform: {
             type: "string",
-            enum: ["微博", "知乎", "B站", "抖音", "小红书", "快手", "头条"],
+            enum: ["微博", "知乎", "B站", "抖音", "小红书", "快手", "头条", "百度"],
             description: "目标平台名称",
           },
         },
@@ -329,7 +345,7 @@ function buildSystemPrompt(domain: string, platforms: string[]) {
   return `你是一个专业的自媒体热点分析 Agent。${domainHint}目标平台是：${platforms.join("、")}。
 
 你的能力：
-1. fetch_hot_topics: 从微博、知乎、B站、抖音、小红书、快手、头条抓取实时热点
+1. fetch_hot_topics: 从微博、知乎、B站、抖音、小红书、快手、头条、百度抓取实时热点
 2. filter_hot_by_domain: 用 AI 判断哪些热点和用户领域相关
 3. generate_video_script: 根据热点生成短视频脚本（Hook → 痛点 → 内容 → CTA）
 
