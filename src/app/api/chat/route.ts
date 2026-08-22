@@ -201,32 +201,6 @@ async function fetchXiaohongshuHot(): Promise<any[]> {
   ], "小红书热榜暂时无法获取，建议稍后重试");
 }
 
-async function fetchKuaishouHot(): Promise<any[]> {
-  return tryFetchSources([
-    async () => {
-      // 源1：本地 DailyHotApi
-      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/kuaishou`);
-      const json = await res.json();
-      const list = json?.data || [];
-      if (list.length === 0) throw new Error("empty");
-      return list.slice(0, 20).map((item: any, i: number) => ({
-        rank: i + 1, title: item.title, url: item.url || "",
-      }));
-    },
-    async () => {
-      // 源2（备用）：今日头条热榜作为替代（快手无稳定公开接口，/baidu 也已失效）
-      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/toutiao`);
-      const json = await res.json();
-      const list = json?.data || [];
-      if (list.length === 0) throw new Error("empty");
-      return list.slice(0, 20).map((item: any, i: number) => ({
-        rank: i + 1, title: item.title, url: item.url || "",
-        note: "数据来源：今日头条热榜（快手接口暂不可用时的替代）",
-      }));
-    },
-  ], "快手热榜暂时无法获取，建议稍后重试");
-}
-
 async function fetchToutiaoHot(): Promise<any[]> {
   return tryFetchSources([
     async () => {
@@ -304,7 +278,6 @@ const PLATFORM_FETCHERS: Record<string, () => Promise<any[]>> = {
   B站: fetchBilibiliHot,
   抖音: fetchDouyinHot,
   小红书: fetchXiaohongshuHot,
-  快手: fetchKuaishouHot,
   头条: fetchToutiaoHot,
   百度: fetchBaiduHot,
 };
@@ -322,7 +295,7 @@ const TOOLS = [
         properties: {
           platform: {
             type: "string",
-            enum: ["微博", "知乎", "B站", "抖音", "小红书", "快手", "头条", "百度"],
+            enum: ["微博", "知乎", "B站", "抖音", "小红书", "头条", "百度"],
             description: "目标平台名称",
           },
         },
@@ -381,7 +354,7 @@ function buildSystemPrompt(domain: string, platforms: string[]) {
   return `你是一个专业的自媒体热点分析 Agent。${domainHint}目标平台是：${platforms.join("、")}。
 
 你的能力：
-1. fetch_hot_topics: 从微博、知乎、B站、抖音、小红书、快手、头条、百度抓取实时热点
+1. fetch_hot_topics: 从微博、知乎、B站、抖音、小红书、头条、百度抓取实时热点
 2. filter_hot_by_domain: 用 AI 判断哪些热点和用户领域相关
 3. generate_video_script: 根据热点生成短视频脚本（Hook → 痛点 → 内容 → CTA）
 
