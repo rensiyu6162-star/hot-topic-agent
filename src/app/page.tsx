@@ -44,6 +44,7 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState("");
+  const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [keyInput, setKeyInput] = useState("");
   const [showSettings, setShowSettings] = useState(false);
@@ -219,6 +220,7 @@ export default function Home() {
       setSessions(next);
       if (id === activeId) setActiveId(next[0].id);
     }
+    setPendingDelete(null);
   };
 
   const switchSession = (id: string) => {
@@ -309,6 +311,40 @@ export default function Home() {
 
   return (
     <main className="h-[100dvh] flex flex-col bg-gray-50 overflow-hidden">
+      {/* 删除会话二次确认 */}
+      {pendingDelete && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setPendingDelete(null)}
+          />
+          <div className="relative z-10 w-full max-w-xs bg-white rounded-2xl shadow-xl p-5 space-y-4">
+            <div className="space-y-1">
+              <div className="font-bold text-gray-800">删除会话</div>
+              <p className="text-sm text-gray-500 leading-relaxed">
+                确定删除会话「
+                <span className="text-gray-700">{pendingDelete.title}</span>
+                」吗？该会话的聊天记录将被清除，此操作不可撤销。
+              </p>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setPendingDelete(null)}
+                className="text-sm px-3 py-1.5 rounded-lg border text-gray-600 hover:bg-gray-50 transition"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => deleteSession(pendingDelete.id)}
+                className="text-sm px-3 py-1.5 rounded-lg bg-red-500 text-white hover:bg-red-600 transition"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 设置：填写自己的 DeepSeek API Key */}
       {showSettings && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -446,7 +482,7 @@ export default function Home() {
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        deleteSession(s.id);
+                        setPendingDelete(s);
                       }}
                       className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition text-xs shrink-0"
                       title="删除"
