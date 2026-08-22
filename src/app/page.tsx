@@ -126,9 +126,9 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen flex flex-col bg-gray-50">
+    <main className="h-[100dvh] flex flex-col bg-gray-50 overflow-hidden">
       {/* Header */}
-      <header className="bg-white border-b px-4 py-3 shadow-sm space-y-2">
+      <header className="bg-white border-b px-4 py-3 shadow-sm space-y-2 shrink-0">
         <div className="flex items-center justify-between">
           <span className="text-lg font-bold text-indigo-600">🔥 热点抓取 Agent</span>
         </div>
@@ -257,7 +257,7 @@ export default function Home() {
       )}
 
       {/* Input */}
-      <div className="border-t bg-white px-4 py-3">
+      <div className="border-t bg-white px-4 py-3 shrink-0">
         <div className="flex gap-2 max-w-3xl mx-auto">
           <input
             className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
