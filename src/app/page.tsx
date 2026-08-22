@@ -803,54 +803,58 @@ export default function Home() {
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-        {messages.map((msg, i) => (
-          <div
-            key={i}
-            className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-          >
+      <div className="flex-1 overflow-y-auto px-4 py-4">
+        <div className="max-w-3xl mx-auto w-full space-y-4">
+          {messages.map((msg, i) => (
             <div
-              className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
-                msg.role === "user"
-                  ? "bg-indigo-500 text-white"
-                  : "bg-white text-gray-800 shadow-sm border"
-              }`}
+              key={i}
+              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
             >
-              {msg.toolLogs && msg.toolLogs.length > 0 && (
-                <div className="mb-2 text-xs text-gray-400 border-b pb-2 space-y-0.5">
-                  {msg.toolLogs.map((log, j) => (
-                    <div key={j}>🔧 {log}</div>
-                  ))}
-                </div>
-              )}
-              {msg.content}
+              <div
+                className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
+                  msg.role === "user"
+                    ? "bg-indigo-500 text-white"
+                    : "bg-white text-gray-800 shadow-sm border"
+                }`}
+              >
+                {msg.toolLogs && msg.toolLogs.length > 0 && (
+                  <div className="mb-2 text-xs text-gray-400 border-b pb-2 space-y-0.5">
+                    {msg.toolLogs.map((log, j) => (
+                      <div key={j}>🔧 {log}</div>
+                    ))}
+                  </div>
+                )}
+                {msg.content}
+              </div>
             </div>
-          </div>
-        ))}
-        {loading && (
-          <div className="flex justify-start">
-            <div className="bg-white rounded-2xl px-4 py-3 text-sm text-gray-400 shadow-sm border">
-              思考中...
+          ))}
+          {loading && (
+            <div className="flex justify-start">
+              <div className="bg-white rounded-2xl px-4 py-3 text-sm text-gray-400 shadow-sm border">
+                思考中...
+              </div>
             </div>
-          </div>
-        )}
-        <div ref={messagesEndRef} />
+          )}
+          <div ref={messagesEndRef} />
+        </div>
       </div>
 
       {/* Quick Actions */}
       {messages.length <= 1 && (
-        <div className="px-4 pb-2 flex flex-wrap gap-2">
-          {["帮我抓取今日热点", "筛选相关热点并生成脚本", "有哪些爆款选题"].map(
-            (hint) => (
-              <button
-                key={hint}
-                onClick={() => sendMessage(hint)}
-                className="text-xs bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-100 transition"
-              >
-                {hint}
-              </button>
-            )
-          )}
+        <div className="px-4 pb-2">
+          <div className="max-w-3xl mx-auto w-full flex flex-wrap gap-2">
+            {["帮我抓取今日热点", "筛选相关热点并生成脚本", "有哪些爆款选题"].map(
+              (hint) => (
+                <button
+                  key={hint}
+                  onClick={() => sendMessage(hint)}
+                  className="text-xs bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-100 transition"
+                >
+                  {hint}
+                </button>
+              )
+            )}
+          </div>
         </div>
       )}
 
