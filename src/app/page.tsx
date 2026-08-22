@@ -857,10 +857,10 @@ export default function Home() {
               className="flex justify-end"
             >
               <div
-                className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
+                className={`rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
                   msg.role === "user"
-                    ? "bg-indigo-500 text-white"
-                    : "bg-white text-gray-800 shadow-sm border"
+                    ? "max-w-[85%] bg-indigo-500 text-white"
+                    : "w-full bg-white text-gray-800 shadow-sm border"
                 }`}
               >
                 {msg.toolLogs && msg.toolLogs.length > 0 && (
