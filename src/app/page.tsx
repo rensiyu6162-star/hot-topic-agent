@@ -28,6 +28,17 @@ const newSession = (): Session => ({
   messages: [WELCOME],
 });
 
+// 同步码：hot-xxxx-xxxx-xxxx，去掉易混字符（0/o/1/l 等）
+const genSyncCode = () => {
+  const alpha = "abcdefghijkmnpqrstuvwxyz23456789";
+  const seg = (n: number) =>
+    Array.from(
+      { length: n },
+      () => alpha[Math.floor(Math.random() * alpha.length)]
+    ).join("");
+  return `hot-${seg(4)}-${seg(4)}-${seg(4)}`;
+};
+
 const PLATFORMS = ["微博", "知乎", "B站", "抖音", "小红书", "快手", "头条", "百度"];
 const DOMAINS = ["科技数码", "职场成长", "美食探店", "娱乐八卦", "财经理财", "健康养生", "教育学习", "旅行出行"];
 
@@ -48,7 +59,17 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [hydrated, setHydrated] = useState(false);
+  // 跨设备同步（同步码方案，无需登录）
+  const [syncCode, setSyncCode] = useState("");
+  const [showSync, setShowSync] = useState(false);
+  const [codeInput, setCodeInput] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [lastSyncAt, setLastSyncAt] = useState<number>(0);
+  const [copied, setCopied] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skipPush = useRef(false);
 
   const activeSession = sessions.find((s) => s.id === activeId) ?? sessions[0];
   const messages = activeSession?.messages ?? [];
@@ -71,6 +92,9 @@ export default function Home() {
       const savedSelected = localStorage.getItem("selectedDomains");
       if (savedOptions) setDomainOptions(JSON.parse(savedOptions));
       if (savedSelected) setSelectedDomains(JSON.parse(savedSelected));
+
+      const savedCode = localStorage.getItem("syncCode");
+      if (savedCode) setSyncCode(savedCode);
 
       const savedSessions = localStorage.getItem("sessions");
       const savedActive = localStorage.getItem("activeSessionId");
@@ -112,6 +136,142 @@ export default function Home() {
       localStorage.setItem("activeSessionId", activeId);
     } catch {}
   }, [hydrated, domainOptions, selectedDomains, sessions, activeId]);
+
+  // ===== 跨设备同步 =====
+  const buildPayload = () => ({
+    sessions,
+    activeId,
+    domainOptions,
+    selectedDomains,
+  });
+
+  const applyPayload = (p: any) => {
+    if (!p) return;
+    skipPush.current = true; // 应用云端数据后不要立刻回推
+    if (Array.isArray(p.sessions) && p.sessions.length > 0) {
+      setSessions(p.sessions);
+      const valid =
+        p.activeId && p.sessions.some((s: Session) => s.id === p.activeId);
+      setActiveId(valid ? p.activeId : p.sessions[0].id);
+    }
+    if (Array.isArray(p.domainOptions)) setDomainOptions(p.domainOptions);
+    if (Array.isArray(p.selectedDomains)) setSelectedDomains(p.selectedDomains);
+  };
+
+  const pushSync = async (code: string) => {
+    if (!code) return;
+    try {
+      const res = await fetch("/api/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, payload: buildPayload() }),
+      });
+      const data = await res.json();
+      if (res.ok) setLastSyncAt(data.updatedAt || Date.now());
+    } catch {}
+  };
+
+  const pullSync = async (code: string, silent = false): Promise<boolean> => {
+    if (!code) return false;
+    if (!silent) {
+      setSyncBusy(true);
+      setSyncMsg(null);
+    }
+    try {
+      const res = await fetch(`/api/sync?code=${encodeURIComponent(code)}`);
+      const data = await res.json();
+      if (!res.ok) {
+        if (!silent) setSyncMsg({ ok: false, text: data.error || "拉取失败" });
+        return false;
+      }
+      applyPayload(data.payload);
+      setLastSyncAt(data.updatedAt || 0);
+      if (!silent) setSyncMsg({ ok: true, text: "已从云端拉取最新数据" });
+      return true;
+    } catch {
+      if (!silent) setSyncMsg({ ok: false, text: "网络异常，请稍后重试" });
+      return false;
+    } finally {
+      if (!silent) setSyncBusy(false);
+    }
+  };
+
+  const enableSync = async () => {
+    const code = genSyncCode();
+    setSyncBusy(true);
+    setSyncMsg(null);
+    try {
+      const res = await fetch("/api/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, payload: buildPayload() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSyncMsg({ ok: false, text: data.error || "启用失败" });
+        return;
+      }
+      setSyncCode(code);
+      try {
+        localStorage.setItem("syncCode", code);
+      } catch {}
+      setLastSyncAt(data.updatedAt || Date.now());
+      setSyncMsg({ ok: true, text: "已启用同步，请在其他设备输入此码" });
+    } catch {
+      setSyncMsg({ ok: false, text: "网络异常，请稍后重试" });
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const importCode = async () => {
+    const c = codeInput.trim();
+    if (!c) return;
+    const ok = await pullSync(c, false);
+    if (ok) {
+      setSyncCode(c);
+      try {
+        localStorage.setItem("syncCode", c);
+      } catch {}
+      setSyncMsg({ ok: true, text: "已导入并绑定该同步码" });
+      setCodeInput("");
+    }
+  };
+
+  const disableSync = () => {
+    setSyncCode("");
+    try {
+      localStorage.removeItem("syncCode");
+    } catch {}
+    setSyncMsg({ ok: true, text: "已停用同步，数据仅保留在本设备" });
+  };
+
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(syncCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {}
+  };
+
+  // 首次加载后，若已绑定同步码则自动拉一次云端最新数据
+  useEffect(() => {
+    if (!hydrated) return;
+    if (syncCode) pullSync(syncCode, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated]);
+
+  // 数据变化时防抖自动上传（已绑定同步码时）
+  useEffect(() => {
+    if (!hydrated || !syncCode) return;
+    if (skipPush.current) {
+      skipPush.current = false;
+      return;
+    }
+    if (pushTimer.current) clearTimeout(pushTimer.current);
+    pushTimer.current = setTimeout(() => pushSync(syncCode), 1500);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions, domainOptions, selectedDomains, activeId, syncCode, hydrated]);
 
   const togglePlatform = (p: string) => {
     setSelectedPlatforms((prev) =>
@@ -273,6 +433,123 @@ export default function Home() {
         </div>
       )}
 
+      {/* 跨设备同步 */}
+      {showSync && (
+        <div className="fixed inset-0 z-[55] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setShowSync(false)}
+          />
+          <div className="relative z-10 w-full max-w-md bg-white rounded-2xl shadow-xl p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-gray-800">跨设备同步</span>
+              <button
+                onClick={() => setShowSync(false)}
+                className="text-gray-400 hover:text-gray-600 text-lg leading-none"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 leading-relaxed">
+              用一串「同步码」在多台设备间共享会话与设置，无需注册登录。在新设备打开本站，输入同一串码即可拉取数据。
+            </p>
+
+            {syncCode ? (
+              <div className="space-y-3">
+                <div className="text-xs text-gray-400">你的同步码</div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 bg-gray-50 border rounded-lg px-3 py-2 text-sm font-mono tracking-wide select-all">
+                    {syncCode}
+                  </code>
+                  <button
+                    onClick={copyCode}
+                    className="text-xs shrink-0 px-3 py-2 rounded-lg border text-gray-600 hover:bg-gray-50 transition"
+                  >
+                    {copied ? "已复制" : "复制"}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-400">
+                  在其他设备打开本站 → 点「🔄 同步」→ 输入此码即可。
+                  {lastSyncAt > 0 && (
+                    <>
+                      <br />
+                      上次同步：{new Date(lastSyncAt).toLocaleString()}
+                    </>
+                  )}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => pushSync(syncCode)}
+                    disabled={syncBusy}
+                    className="text-sm px-3 py-1.5 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition"
+                  >
+                    立即上传
+                  </button>
+                  <button
+                    onClick={() => pullSync(syncCode)}
+                    disabled={syncBusy}
+                    className="text-sm px-3 py-1.5 rounded-lg border text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition"
+                  >
+                    {syncBusy ? "处理中…" : "从云端拉取"}
+                  </button>
+                  <button
+                    onClick={disableSync}
+                    className="text-sm px-3 py-1.5 rounded-lg border text-gray-400 hover:text-red-500 hover:border-red-300 transition ml-auto"
+                  >
+                    停用同步
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <button
+                  onClick={enableSync}
+                  disabled={syncBusy}
+                  className="w-full text-sm px-3 py-2 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition"
+                >
+                  {syncBusy ? "处理中…" : "启用同步（生成我的同步码）"}
+                </button>
+                <div className="flex items-center gap-2 text-xs text-gray-300">
+                  <div className="flex-1 h-px bg-gray-200" />
+                  或输入已有同步码
+                  <div className="flex-1 h-px bg-gray-200" />
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    value={codeInput}
+                    onChange={(e) => setCodeInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && !syncBusy && importCode()}
+                    placeholder="hot-xxxx-xxxx-xxxx"
+                    className="flex-1 border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                  />
+                  <button
+                    onClick={importCode}
+                    disabled={syncBusy || !codeInput.trim()}
+                    className="text-sm shrink-0 px-3 py-2 rounded-lg border text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition"
+                  >
+                    {syncBusy ? "…" : "导入"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {syncMsg && (
+              <div
+                className={`text-xs ${
+                  syncMsg.ok ? "text-emerald-600" : "text-red-500"
+                }`}
+              >
+                {syncMsg.text}
+              </div>
+            )}
+
+            <p className="text-[11px] text-gray-400 leading-relaxed border-t pt-3">
+              ⚠️ 持有同步码的人都能读写你的数据，请勿公开分享。多台设备同时编辑时，以最后一次上传为准。
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* 会话侧边栏 */}
       {sidebarOpen && (
         <div className="fixed inset-0 z-40 flex">
@@ -366,6 +643,20 @@ export default function Home() {
             <span className="text-lg font-bold text-indigo-600">🔥 热点抓取 Agent</span>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                setSyncMsg(null);
+                setShowSync(true);
+              }}
+              className={`text-xs border rounded-lg px-2 py-1 transition ${
+                syncCode
+                  ? "text-emerald-600 border-emerald-200 hover:bg-emerald-50"
+                  : "text-gray-500 border-gray-200 hover:text-indigo-600 hover:border-indigo-300"
+              }`}
+              title={syncCode ? "同步已启用，点击管理" : "跨设备同步"}
+            >
+              🔄 {syncCode ? "已同步" : "同步"}
+            </button>
             <button
               onClick={createSession}
               className="text-xs text-indigo-600 border border-indigo-200 rounded-lg px-2 py-1 hover:bg-indigo-50 transition"
