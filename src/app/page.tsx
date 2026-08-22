@@ -48,6 +48,8 @@ export default function Home() {
   const [selectedDomains, setSelectedDomains] = useState<string[]>([...DOMAINS]);
   const [showDomainInput, setShowDomainInput] = useState(false);
   const [domainInput, setDomainInput] = useState("");
+  // 会话进行中时，领域/平台收进标题栏的下拉菜单
+  const [openMenu, setOpenMenu] = useState<null | "domain" | "platform">(null);
   const [sessions, setSessions] = useState<Session[]>([
     { id: DEFAULT_SESSION_ID, title: "新会话", messages: [WELCOME] },
   ]);
@@ -397,6 +399,73 @@ export default function Home() {
     }
   };
 
+  // 是否已开始对话：一旦发过内容，就把领域/平台收进标题栏下拉，给消息区腾地方
+  const hasStarted = messages.some((m) => m.role === "user");
+
+  const renderDomainChips = () => (
+    <div className="flex flex-wrap gap-2 items-center">
+      {domainOptions.map((d) => {
+        const active = selectedDomains.includes(d);
+        return (
+          <button
+            key={d}
+            onClick={() => toggleDomain(d)}
+            className={`px-3 py-1 rounded-full text-xs border transition flex items-center gap-1 ${
+              active
+                ? "bg-emerald-500 text-white border-emerald-500"
+                : "bg-white text-gray-500 border-gray-300 hover:border-emerald-300"
+            }`}
+          >
+            <span>{d}</span>
+            {active && <span className="opacity-80 leading-none">✕</span>}
+          </button>
+        );
+      })}
+      {showDomainInput ? (
+        <input
+          autoFocus
+          value={domainInput}
+          onChange={(e) => setDomainInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") addCustomDomain();
+            if (e.key === "Escape") {
+              setShowDomainInput(false);
+              setDomainInput("");
+            }
+          }}
+          onBlur={addCustomDomain}
+          placeholder="输入领域后回车"
+          className="px-2 py-1 rounded-full text-xs border border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 w-32"
+        />
+      ) : (
+        <button
+          onClick={() => setShowDomainInput(true)}
+          className="px-3 py-1 rounded-full text-xs border border-dashed border-gray-400 text-gray-500 hover:border-emerald-400 hover:text-emerald-500 transition"
+        >
+          ＋ 添加
+        </button>
+      )}
+    </div>
+  );
+
+  const renderPlatformChips = () => (
+    <div className="flex flex-wrap gap-2">
+      {PLATFORMS.map((p) => (
+        <button
+          key={p}
+          onClick={() => togglePlatform(p)}
+          className={`px-3 py-1 rounded-full text-xs border transition ${
+            selectedPlatforms.includes(p)
+              ? "bg-indigo-500 text-white border-indigo-500"
+              : "bg-white text-gray-600 border-gray-300 hover:border-indigo-300"
+          }`}
+        >
+          {p}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
     <main className="h-[100dvh] flex flex-col bg-gray-50 overflow-hidden">
       {/* 删除会话二次确认 */}
@@ -630,19 +699,67 @@ export default function Home() {
       )}
 
       {/* Header */}
-      <header className="bg-white border-b px-4 py-3 shadow-sm space-y-2 shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
+      <header className="bg-white border-b px-4 py-3 shadow-sm space-y-2 shrink-0 pt-[max(0.75rem,env(safe-area-inset-top))]">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             <button
               onClick={() => setSidebarOpen(true)}
-              className="text-gray-500 hover:text-indigo-600 transition text-lg leading-none px-1"
+              className="text-gray-500 hover:text-indigo-600 transition text-lg leading-none px-1 shrink-0"
               title="会话列表"
             >
               ☰
             </button>
-            <span className="text-lg font-bold text-indigo-600">🔥 热点抓取 Agent</span>
+            <span className="text-lg font-bold text-indigo-600 whitespace-nowrap">🔥 热点抓取 Agent</span>
+
+            {/* 会话进行中：领域 / 平台 收成下拉，点开看完整选项 */}
+            {hasStarted && (
+              <div className="flex items-center gap-1.5 min-w-0">
+                <div className="relative">
+                  <button
+                    onClick={() =>
+                      setOpenMenu(openMenu === "domain" ? null : "domain")
+                    }
+                    className={`text-xs border rounded-full px-2.5 py-1 whitespace-nowrap transition ${
+                      openMenu === "domain"
+                        ? "border-emerald-400 text-emerald-600 bg-emerald-50"
+                        : "border-gray-300 text-gray-500 hover:border-emerald-300"
+                    }`}
+                  >
+                    领域 {selectedDomains.length}/{domainOptions.length} ▾
+                  </button>
+                  {openMenu === "domain" && (
+                    <div className="absolute left-0 top-full mt-2 z-30 w-72 max-w-[80vw] bg-white border rounded-xl shadow-lg p-3">
+                      <div className="text-xs text-gray-400 mb-2">
+                        关注领域（点选中项可叉掉，点 ＋ 添加细分领域）
+                      </div>
+                      {renderDomainChips()}
+                    </div>
+                  )}
+                </div>
+                <div className="relative">
+                  <button
+                    onClick={() =>
+                      setOpenMenu(openMenu === "platform" ? null : "platform")
+                    }
+                    className={`text-xs border rounded-full px-2.5 py-1 whitespace-nowrap transition ${
+                      openMenu === "platform"
+                        ? "border-indigo-400 text-indigo-600 bg-indigo-50"
+                        : "border-gray-300 text-gray-500 hover:border-indigo-300"
+                    }`}
+                  >
+                    平台 {selectedPlatforms.length}/{PLATFORMS.length} ▾
+                  </button>
+                  {openMenu === "platform" && (
+                    <div className="absolute left-0 top-full mt-2 z-30 w-72 max-w-[80vw] bg-white border rounded-xl shadow-lg p-3">
+                      <div className="text-xs text-gray-400 mb-2">抓取平台</div>
+                      {renderPlatformChips()}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => {
                 setSyncMsg(null);
@@ -660,76 +777,30 @@ export default function Home() {
           </div>
         </div>
 
-        {/* 关注领域：多选，默认全选，可叉掉，可 + 添加自定义细分领域 */}
-        <div>
-          <div className="text-xs text-gray-400 mb-1">
-            关注领域（默认全选，点选中项可叉掉，点 ＋ 添加你感兴趣的细分领域）
-          </div>
-          <div className="flex flex-wrap gap-2 items-center">
-            {domainOptions.map((d) => {
-              const active = selectedDomains.includes(d);
-              return (
-                <button
-                  key={d}
-                  onClick={() => toggleDomain(d)}
-                  className={`px-3 py-1 rounded-full text-xs border transition flex items-center gap-1 ${
-                    active
-                      ? "bg-emerald-500 text-white border-emerald-500"
-                      : "bg-white text-gray-500 border-gray-300 hover:border-emerald-300"
-                  }`}
-                >
-                  <span>{d}</span>
-                  {active && <span className="opacity-80 leading-none">✕</span>}
-                </button>
-              );
-            })}
-            {showDomainInput ? (
-              <input
-                autoFocus
-                value={domainInput}
-                onChange={(e) => setDomainInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") addCustomDomain();
-                  if (e.key === "Escape") {
-                    setShowDomainInput(false);
-                    setDomainInput("");
-                  }
-                }}
-                onBlur={addCustomDomain}
-                placeholder="输入领域后回车"
-                className="px-2 py-1 rounded-full text-xs border border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 w-32"
-              />
-            ) : (
-              <button
-                onClick={() => setShowDomainInput(true)}
-                className="px-3 py-1 rounded-full text-xs border border-dashed border-gray-400 text-gray-500 hover:border-emerald-400 hover:text-emerald-500 transition"
-              >
-                ＋ 添加
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* 抓取平台 */}
-        <div>
-          <div className="text-xs text-gray-400 mb-1">抓取平台</div>
-          <div className="flex flex-wrap gap-2">
-            {PLATFORMS.map((p) => (
-              <button
-                key={p}
-                onClick={() => togglePlatform(p)}
-                className={`px-3 py-1 rounded-full text-xs border transition ${
-                  selectedPlatforms.includes(p)
-                    ? "bg-indigo-500 text-white border-indigo-500"
-                    : "bg-white text-gray-600 border-gray-300 hover:border-indigo-300"
-                }`}
-              >
-                {p}
-              </button>
-            ))}
-          </div>
-        </div>
+        {/* 会话开始前：完整展示领域与平台选择 */}
+        {!hasStarted && (
+          <>
+            <div>
+              <div className="text-xs text-gray-400 mb-1">
+                关注领域（默认全选，点选中项可叉掉，点 ＋ 添加你感兴趣的细分领域）
+              </div>
+              {renderDomainChips()}
+            </div>
+            <div>
+              <div className="text-xs text-gray-400 mb-1">抓取平台</div>
+              {renderPlatformChips()}
+            </div>
+          </>
+        )}
       </header>
+
+      {/* 下拉菜单点击外部关闭 */}
+      {openMenu && (
+        <div
+          className="fixed inset-0 z-20"
+          onClick={() => setOpenMenu(null)}
+        />
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
@@ -784,7 +855,7 @@ export default function Home() {
       )}
 
       {/* Input */}
-      <div className="border-t bg-white px-4 py-3 shrink-0">
+      <div className="border-t bg-white px-4 py-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <div className="flex gap-2 max-w-3xl mx-auto">
           <input
             className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
