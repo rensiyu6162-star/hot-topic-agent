@@ -60,6 +60,9 @@ export default function Home() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState("");
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
+  const [pendingDeleteDomain, setPendingDeleteDomain] = useState<string | null>(
+    null
+  );
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [hydrated, setHydrated] = useState(false);
@@ -316,6 +319,12 @@ export default function Home() {
     setShowDomainInput(false);
   };
 
+  const deleteDomain = (d: string) => {
+    setDomainOptions((prev) => prev.filter((x) => x !== d));
+    setSelectedDomains((prev) => prev.filter((x) => x !== d));
+    setPendingDeleteDomain(null);
+  };
+
   const createSession = () => {
     const s = newSession();
     setSessions((prev) => [s, ...prev]);
@@ -416,69 +425,97 @@ export default function Home() {
     }
   };
 
-  const renderDomainChips = () => (
-    <div className="flex flex-wrap gap-2 items-center">
-      {domainOptions.map((d) => {
-        const active = selectedDomains.includes(d);
-        return (
+  const renderDomainChips = () => {
+    const ordered = [
+      ...domainOptions.filter((d) => selectedDomains.includes(d)),
+      ...domainOptions.filter((d) => !selectedDomains.includes(d)),
+    ];
+    return (
+      <div className="flex flex-wrap gap-2 items-center">
+        {ordered.map((d) => {
+          const active = selectedDomains.includes(d);
+          const custom = !DOMAINS.includes(d);
+          return (
+            <button
+              key={d}
+              onClick={() => toggleDomain(d)}
+              className={`px-3 py-1 rounded-full text-xs border transition flex items-center gap-1 ${
+                active
+                  ? "bg-emerald-500 text-white border-emerald-500"
+                  : "bg-white text-gray-500 border-gray-300 hover:border-emerald-300"
+              }`}
+            >
+              <span>{d}</span>
+              {custom && !active && (
+                <span
+                  role="button"
+                  title="删除自定义领域"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPendingDeleteDomain(d);
+                  }}
+                  className="ml-0.5 text-gray-400 hover:text-red-500 leading-none"
+                >
+                  ✕
+                </span>
+              )}
+            </button>
+          );
+        })}
+        {showDomainInput ? (
+          <input
+            autoFocus
+            value={domainInput}
+            onChange={(e) => setDomainInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") addCustomDomain();
+              if (e.key === "Escape") {
+                setShowDomainInput(false);
+                setDomainInput("");
+              }
+            }}
+            onBlur={addCustomDomain}
+            placeholder="输入领域后回车"
+            className="px-2 py-1 rounded-full text-xs border border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 w-32"
+          />
+        ) : (
           <button
-            key={d}
-            onClick={() => toggleDomain(d)}
-            className={`px-3 py-1 rounded-full text-xs border transition flex items-center gap-1 ${
-              active
-                ? "bg-emerald-500 text-white border-emerald-500"
-                : "bg-white text-gray-500 border-gray-300 hover:border-emerald-300"
-            }`}
+            onClick={() => setShowDomainInput(true)}
+            className="px-3 py-1 rounded-full text-xs border border-dashed border-gray-400 text-gray-500 hover:border-emerald-400 hover:text-emerald-500 transition"
           >
-            <span>{d}</span>
-            {active && <span className="opacity-80 leading-none">✕</span>}
+            ＋ 添加
           </button>
-        );
-      })}
-      {showDomainInput ? (
-        <input
-          autoFocus
-          value={domainInput}
-          onChange={(e) => setDomainInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") addCustomDomain();
-            if (e.key === "Escape") {
-              setShowDomainInput(false);
-              setDomainInput("");
-            }
-          }}
-          onBlur={addCustomDomain}
-          placeholder="输入领域后回车"
-          className="px-2 py-1 rounded-full text-xs border border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 w-32"
-        />
-      ) : (
-        <button
-          onClick={() => setShowDomainInput(true)}
-          className="px-3 py-1 rounded-full text-xs border border-dashed border-gray-400 text-gray-500 hover:border-emerald-400 hover:text-emerald-500 transition"
-        >
-          ＋ 添加
-        </button>
-      )}
-    </div>
-  );
+        )}
+      </div>
+    );
+  };
 
-  const renderPlatformChips = () => (
-    <div className="flex flex-wrap gap-2">
-      {PLATFORMS.map((p) => (
-        <button
-          key={p}
-          onClick={() => togglePlatform(p)}
-          className={`px-3 py-1 rounded-full text-xs border transition ${
-            selectedPlatforms.includes(p)
-              ? "bg-indigo-500 text-white border-indigo-500"
-              : "bg-white text-gray-600 border-gray-300 hover:border-indigo-300"
-          }`}
-        >
-          {p}
-        </button>
-      ))}
-    </div>
-  );
+  const renderPlatformChips = () => {
+    const ordered = [
+      ...PLATFORMS.filter((p) => selectedPlatforms.includes(p)),
+      ...PLATFORMS.filter((p) => !selectedPlatforms.includes(p)),
+    ];
+    return (
+      <div className="flex flex-wrap gap-2">
+        {ordered.map((p) => {
+          const active = selectedPlatforms.includes(p);
+          return (
+            <button
+              key={p}
+              onClick={() => togglePlatform(p)}
+              className={`px-3 py-1 rounded-full text-xs border transition ${
+                active
+                  ? "bg-indigo-500 text-white border-indigo-500"
+                  : "bg-white text-gray-600 border-gray-300 hover:border-indigo-300"
+              }`}
+            >
+              {p}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
 
   return (
     <main className="h-[100dvh] flex flex-col bg-gray-50 overflow-hidden">
@@ -507,6 +544,40 @@ export default function Home() {
               </button>
               <button
                 onClick={() => deleteSession(pendingDelete.id)}
+                className="text-sm px-3 py-1.5 rounded-lg bg-red-500 text-white hover:bg-red-600 transition"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 删除自定义领域二次确认 */}
+      {pendingDeleteDomain && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setPendingDeleteDomain(null)}
+          />
+          <div className="relative z-10 w-full max-w-xs bg-white rounded-2xl shadow-xl p-5 space-y-4">
+            <div className="space-y-1">
+              <div className="font-bold text-gray-800">删除自定义领域</div>
+              <p className="text-sm text-gray-500 leading-relaxed">
+                确定删除「
+                <span className="text-gray-700">{pendingDeleteDomain}</span>
+                」吗？
+              </p>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setPendingDeleteDomain(null)}
+                className="text-sm px-3 py-1.5 rounded-lg border text-gray-600 hover:bg-gray-50 transition"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => deleteDomain(pendingDeleteDomain)}
                 className="text-sm px-3 py-1.5 rounded-lg bg-red-500 text-white hover:bg-red-600 transition"
               >
                 删除
@@ -748,7 +819,8 @@ export default function Home() {
                     {openMenu === "domain" && (
                       <div className="absolute left-0 top-full mt-2 z-30 w-72 max-w-[80vw] bg-white border rounded-xl shadow-lg p-3">
                         <div className="text-xs text-gray-400 mb-2">
-                          关注领域（点选中项可叉掉，点 ＋ 添加细分领域）
+                          关注领域
+
                         </div>
                         {renderDomainChips()}
                       </div>
@@ -794,7 +866,8 @@ export default function Home() {
                     <div className="fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+3.5rem)] z-30 bg-white border rounded-xl shadow-lg p-3 space-y-3">
                       <div>
                         <div className="text-xs text-gray-400 mb-2">
-                          关注领域（点选中项可叉掉，点 ＋ 添加细分领域）
+                          关注领域
+
                         </div>
                         {renderDomainChips()}
                       </div>
@@ -841,9 +914,7 @@ export default function Home() {
           {/* 顶部完整选择区：滚出视野后才在标题栏出现下拉入口 */}
           <div ref={selectorsRef} className="space-y-2">
             <div>
-              <div className="text-xs text-gray-400 mb-1">
-                关注领域（默认全选，点选中项可叉掉，点 ＋ 添加你感兴趣的细分领域）
-              </div>
+              <div className="text-xs text-gray-400 mb-1">关注领域</div>
               {renderDomainChips()}
             </div>
             <div>
