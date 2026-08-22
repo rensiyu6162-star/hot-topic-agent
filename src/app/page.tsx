@@ -647,13 +647,11 @@ export default function Home() {
       const st = details[key];
       return (
         <div key={li} className="group">
-          <div className="flex items-start gap-2">
-            <div className="flex-1 whitespace-pre-wrap">
-              {renderLineWithTags(line, key)}
-            </div>
+          <div className="whitespace-pre-wrap">
+            {renderLineWithTags(line, key)}
             <button
               onClick={() => toggleDetail(key, topic, platform)}
-              className="shrink-0 self-start text-[11px] leading-none px-2 py-1 rounded-full border border-indigo-300 text-indigo-500 hover:bg-indigo-50 transition opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+              className="align-middle ml-2 whitespace-nowrap text-[11px] leading-none px-2 py-1 rounded-full border border-indigo-300 text-indigo-500 hover:bg-indigo-50 transition opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
             >
               {st?.open ? "收起" : "查看详情"}
             </button>
