@@ -342,6 +342,9 @@ function buildSystemPrompt(domain: string, platforms: string[]) {
   const domainHint = domain
     ? `用户的创作领域是「${domain}」。`
     : `用户未指定创作领域，如果用户在消息中提到领域相关信息，请据此筛选。`;
+  const sortRule = domain
+    ? `- ⚠️ 用户已明确领域「${domain}」：展示热点时，务必把与「${domain}」高度相关的热点排在最前面，并在这些条目标题前加 ⭐ 标记；其余热点按原热度顺序排在后面。`
+    : `- 用户未明确领域：按平台热度原顺序展示即可，不做重排。`;
   return `你是一个专业的自媒体热点分析 Agent。${domainHint}目标平台是：${platforms.join("、")}。
 
 你的能力：
@@ -354,6 +357,12 @@ function buildSystemPrompt(domain: string, platforms: string[]) {
 - 用户说"筛选"或"相关"时，调用 filter_hot_by_domain，从用户消息中推断领域
 - 用户说"生成脚本"或"写脚本"时，调用 generate_video_script
 - 你也可以自主判断，一次性完成 抓取→筛选→生成 的完整流程
+
+展示热点的输出规范（每次列出热点都必须遵守）：
+- 每一条热点后面都要用【】标注它所属的创作领域标签，可以多标（一条热点可同时属于多个领域）。
+- 领域标签从以下集合中选取：科技数码、职场成长、美食探店、娱乐八卦、财经理财、健康养生、教育学习、旅行出行；若都不贴合，可补充一个最贴切的自定义标签。
+${sortRule}
+- 格式示例：1. ⭐ 某热点标题 【职场成长】【财经理财】
 
 回复使用中文，格式清晰，善用 emoji 让内容更生动。`;
 }
