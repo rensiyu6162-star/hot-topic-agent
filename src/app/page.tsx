@@ -8,6 +8,18 @@ interface Message {
   toolLogs?: string[];
 }
 
+interface DetailData {
+  report: string;
+  sites: { title: string; url: string }[];
+  videos: { title: string; url: string }[];
+}
+
+interface DetailState {
+  open: boolean;
+  loading: boolean;
+  data: DetailData | null;
+}
+
 interface Session {
   id: string;
   title: string;
@@ -74,6 +86,8 @@ export default function Home() {
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<number>(0);
   const [copied, setCopied] = useState(false);
+  // 每条热点的「查看详情」展开状态（key = 消息序号:行号）
+  const [details, setDetails] = useState<Record<string, DetailState>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectorsRef = useRef<HTMLDivElement>(null);
@@ -517,22 +531,154 @@ export default function Home() {
     );
   };
 
-  // 把正文里 【xxx】 形式的标签渲染成跑道圆形胶囊
-  const renderMessageContent = (content: string) => {
-    const parts = content.split(/(【[^】]*】)/g);
+  // 把一行文字里的 【xxx】 渲染成跑道圆形胶囊
+  const renderLineWithTags = (text: string, keyPrefix: string) => {
+    const parts = text.split(/(【[^】]*】)/g);
     return parts.map((part, idx) => {
       const m = part.match(/^【([^】]*)】$/);
       if (m) {
         return (
           <span
-            key={idx}
-            className="inline-flex items-center rounded-full bg-emerald-50 text-emerald-600 text-xs px-2 py-0.5 border border-emerald-200 mx-0.5 align-middle"
+            key={`${keyPrefix}-${idx}`}
+            className="inline-flex items-center rounded-full bg-emerald-50 text-emerald-600 text-[10px] leading-none px-1.5 py-0.5 mx-0.5 align-middle"
           >
             {m[1]}
           </span>
         );
       }
-      return <span key={idx}>{part}</span>;
+      return <span key={`${keyPrefix}-${idx}`}>{part}</span>;
+    });
+  };
+
+  // 从热点行里提取纯话题标题（去掉序号、⭐ 和 【】标签）
+  const extractTopic = (line: string) =>
+    line
+      .replace(/^\s*\d+[.、)]\s*/, "")
+      .replace(/⭐/g, "")
+      .replace(/【[^】]*】/g, "")
+      .trim();
+
+  // 点击「查看详情」：首次拉取详情并展开，之后仅切换展开/收起
+  const toggleDetail = async (key: string, topic: string) => {
+    const cur = details[key];
+    if (cur && cur.data) {
+      setDetails((p) => ({ ...p, [key]: { ...cur, open: !cur.open } }));
+      return;
+    }
+    if (cur && cur.loading) return;
+    setDetails((p) => ({
+      ...p,
+      [key]: { open: true, loading: true, data: null },
+    }));
+    try {
+      const res = await fetch("/api/detail", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic }),
+      });
+      const data = (await res.json()) as DetailData;
+      setDetails((p) => ({ ...p, [key]: { open: true, loading: false, data } }));
+    } catch {
+      setDetails((p) => ({
+        ...p,
+        [key]: {
+          open: true,
+          loading: false,
+          data: { report: "详情获取失败，请稍后重试。", sites: [], videos: [] },
+        },
+      }));
+    }
+  };
+
+  // 渲染 AI 正文：逐行解析，热点条目支持 hover「查看详情」原地展开
+  const renderAssistantContent = (content: string, msgIndex: number) => {
+    const lines = content.split("\n");
+    return lines.map((line, li) => {
+      if (line.trim() === "") return <div key={li} className="h-2" />;
+      const isItem = /^\s*\d+[.、)]\s/.test(line);
+      if (!isItem) {
+        return (
+          <div key={li} className="whitespace-pre-wrap">
+            {renderLineWithTags(line, `${msgIndex}-${li}`)}
+          </div>
+        );
+      }
+      const topic = extractTopic(line);
+      const key = `${msgIndex}:${li}`;
+      const st = details[key];
+      return (
+        <div key={li} className="group">
+          <div className="flex items-start gap-2">
+            <div className="flex-1 whitespace-pre-wrap">
+              {renderLineWithTags(line, key)}
+            </div>
+            <button
+              onClick={() => toggleDetail(key, topic)}
+              className="shrink-0 self-start text-[11px] leading-none px-2 py-1 rounded-full border border-indigo-300 text-indigo-500 hover:bg-indigo-50 transition opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+            >
+              {st?.open ? "收起" : "查看详情"}
+            </button>
+          </div>
+          {st?.open && (
+            <div className="mt-2 mb-2 rounded-xl bg-gray-50 border border-gray-200 p-3 text-xs text-gray-600 space-y-3">
+              {st.loading ? (
+                <div className="text-gray-400">正在生成详情…</div>
+              ) : st.data ? (
+                <>
+                  <div>
+                    <div className="font-semibold text-gray-700 mb-1">
+                      📄 详细报道
+                    </div>
+                    <div className="whitespace-pre-wrap leading-relaxed">
+                      {st.data.report}
+                    </div>
+                  </div>
+                  {st.data.sites?.length > 0 && (
+                    <div>
+                      <div className="font-semibold text-gray-700 mb-1">
+                        🔗 参考网站
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        {st.data.sites.map((s, k) => (
+                          <a
+                            key={k}
+                            href={s.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-indigo-500 hover:underline truncate"
+                          >
+                            {s.title}
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {st.data.videos?.length > 0 && (
+                    <div>
+                      <div className="font-semibold text-gray-700 mb-1">
+                        🎬 参考视频
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        {st.data.videos.map((v, k) => (
+                          <a
+                            key={k}
+                            href={v.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-indigo-500 hover:underline truncate"
+                          >
+                            {v.title}
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </div>
+          )}
+        </div>
+      );
     });
   };
 
@@ -967,9 +1113,9 @@ export default function Home() {
                     ))}
                   </div>
                 )}
-                {msg.content === WELCOME.content
-                  ? msg.content
-                  : renderMessageContent(msg.content)}
+                {msg.role === "assistant" && msg.content !== WELCOME.content
+                  ? renderAssistantContent(msg.content, i)
+                  : msg.content}
               </div>
             </div>
           ))}
