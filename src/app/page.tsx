@@ -1179,7 +1179,7 @@ export default function Home() {
           {messages.map((msg, i) => (
             <div
               key={i}
-              className="flex justify-end"
+              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
             >
               <div
                 className={`rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
