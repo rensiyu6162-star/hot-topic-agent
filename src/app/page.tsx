@@ -321,6 +321,11 @@ export default function Home() {
     );
   };
 
+  const selectAllDomains = () => setSelectedDomains([...domainOptions]);
+  const clearDomains = () => setSelectedDomains([]);
+  const selectAllPlatforms = () => setSelectedPlatforms([...PLATFORMS]);
+  const clearPlatforms = () => setSelectedPlatforms([]);
+
   const addCustomDomain = () => {
     const d = domainInput.trim();
     if (!d) {
@@ -500,6 +505,19 @@ export default function Home() {
             ＋ 添加
           </button>
         )}
+        <span className="mx-1 h-4 w-px bg-gray-200" />
+        <button
+          onClick={selectAllDomains}
+          className="px-3 py-1 rounded-full text-xs border border-gray-200 text-gray-500 hover:border-emerald-300 hover:text-emerald-500 transition"
+        >
+          全选
+        </button>
+        <button
+          onClick={clearDomains}
+          className="px-3 py-1 rounded-full text-xs border border-gray-200 text-gray-500 hover:border-emerald-300 hover:text-emerald-500 transition"
+        >
+          清空
+        </button>
       </div>
     );
   };
@@ -510,7 +528,7 @@ export default function Home() {
       ...PLATFORMS.filter((p) => !selectedPlatforms.includes(p)),
     ];
     return (
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2 items-center">
         {ordered.map((p) => {
           const active = selectedPlatforms.includes(p);
           return (
@@ -527,6 +545,19 @@ export default function Home() {
             </button>
           );
         })}
+        <span className="mx-1 h-4 w-px bg-gray-200" />
+        <button
+          onClick={selectAllPlatforms}
+          className="px-3 py-1 rounded-full text-xs border border-gray-200 text-gray-500 hover:border-indigo-300 hover:text-indigo-500 transition"
+        >
+          全选
+        </button>
+        <button
+          onClick={clearPlatforms}
+          className="px-3 py-1 rounded-full text-xs border border-gray-200 text-gray-500 hover:border-indigo-300 hover:text-indigo-500 transition"
+        >
+          清空
+        </button>
       </div>
     );
   };
@@ -550,12 +581,13 @@ export default function Home() {
     });
   };
 
-  // 从热点行里提取纯话题标题（去掉序号、⭐ 和 【】标签）
+  // 从热点行里提取纯话题标题（去掉序号、⭐、Markdown 星号/井号 和 【】标签）
   const extractTopic = (line: string) =>
     line
       .replace(/^\s*\d+[.、)]\s*/, "")
       .replace(/⭐/g, "")
       .replace(/【[^】]*】/g, "")
+      .replace(/[*#`]+/g, "")
       .trim();
 
   // 从热点行里提取平台标签（如 【微博】→ 微博），用于给详情报道标注来源
