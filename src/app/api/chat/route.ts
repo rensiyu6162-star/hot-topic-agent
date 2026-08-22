@@ -372,7 +372,8 @@ ${sortRule}
 async function executeTool(
   name: string,
   args: any,
-  domain: string
+  domain: string,
+  apiKey: string
 ): Promise<string> {
   switch (name) {
     case "fetch_hot_topics": {
@@ -389,7 +390,7 @@ async function executeTool(
 
 热点列表：
 ${JSON.stringify(args.topics, null, 2)}`;
-      const filterRes = await callLLM([{ role: "user", content: filterPrompt }], false);
+      const filterRes = await callLLM([{ role: "user", content: filterPrompt }], false, apiKey);
       return filterRes;
     }
     case "generate_video_script": {
@@ -406,7 +407,7 @@ ${JSON.stringify(args.topics, null, 2)}`;
 4. 📢 CTA（引导互动的结尾）
 
 字数控制在300-500字，口语化，有节奏感。`;
-      const scriptRes = await callLLM([{ role: "user", content: scriptPrompt }], false);
+      const scriptRes = await callLLM([{ role: "user", content: scriptPrompt }], false, apiKey);
       return scriptRes;
     }
     default:
@@ -418,8 +419,10 @@ ${JSON.stringify(args.topics, null, 2)}`;
 
 async function callLLM(
   messages: any[],
-  useTools: boolean = true
+  useTools: boolean = true,
+  apiKey: string = ""
 ): Promise<any> {
+  const key = apiKey || OPENAI_API_KEY;
   const body: any = {
     model: OPENAI_MODEL,
     messages,
@@ -432,7 +435,7 @@ async function callLLM(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      Authorization: `Bearer ${key}`,
     },
     body: JSON.stringify(body),
   });
@@ -446,7 +449,17 @@ async function callLLM(
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages, domain, platforms } = await req.json();
+    const { messages, domain, platforms, apiKey } = await req.json();
+
+    // 每个用户使用自己的 DeepSeek Key；未提供则回退到服务端默认 Key（可为空）
+    const userKey = (apiKey || "").trim() || OPENAI_API_KEY;
+    if (!userKey) {
+      return NextResponse.json({
+        content:
+          "⚠️ 请先在右上角「设置」中填写你自己的 DeepSeek API Key。密钥只保存在你本机浏览器，费用由你的 DeepSeek 账户承担。",
+        toolLogs: [],
+      });
+    }
 
     const systemMsg = {
       role: "system",
@@ -458,11 +471,11 @@ export async function POST(req: NextRequest) {
     const MAX_ITERATIONS = 5;
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
-      const assistantMessage = await callLLM(conversationMessages, true);
+      const assistantMessage = await callLLM(conversationMessages, true, userKey);
 
       if (!assistantMessage) {
         return NextResponse.json({
-          content: "LLM 返回为空，请检查 API Key 配置。",
+          content: "LLM 返回为空，请检查 API Key 是否正确或余额是否充足。",
           toolLogs,
         });
       }
@@ -487,7 +500,7 @@ export async function POST(req: NextRequest) {
 
         toolLogs.push(`调用 ${fnName}(${fnArgs.platform || fnArgs.topic || ""})`);
 
-        const result = await executeTool(fnName, fnArgs, domain);
+        const result = await executeTool(fnName, fnArgs, domain, userKey);
 
         conversationMessages.push({
           role: "tool",
@@ -502,7 +515,7 @@ export async function POST(req: NextRequest) {
       role: "user",
       content: "请总结以上所有工具调用的结果，给出最终回复。",
     });
-    const finalMsg = await callLLM(conversationMessages, false);
+    const finalMsg = await callLLM(conversationMessages, false, userKey);
 
     return NextResponse.json({
       content: finalMsg || "已完成处理。",
