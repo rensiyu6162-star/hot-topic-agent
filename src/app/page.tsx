@@ -10,8 +10,8 @@ interface Message {
 
 interface DetailData {
   report: string;
-  sites: { title: string; url: string }[];
-  videos: { title: string; url: string; app?: string }[];
+  sites: { title: string; url: string; source?: string; core?: boolean }[];
+  videos: { title: string; url: string; app?: string; source?: string; core?: boolean }[];
 }
 
 interface DetailState {
@@ -558,8 +558,14 @@ export default function Home() {
       .replace(/【[^】]*】/g, "")
       .trim();
 
+  // 从热点行里提取平台标签（如 【微博】→ 微博），用于给详情报道标注来源
+  const extractPlatform = (line: string) => {
+    const m = line.match(/【([^】]*)】/);
+    return m ? m[1].trim() : "";
+  };
+
   // 点击「查看详情」：首次拉取详情并展开，之后仅切换展开/收起
-  const toggleDetail = async (key: string, topic: string) => {
+  const toggleDetail = async (key: string, topic: string, platform = "") => {
     const cur = details[key];
     if (cur && cur.data) {
       setDetails((p) => ({ ...p, [key]: { ...cur, open: !cur.open } }));
@@ -574,7 +580,7 @@ export default function Home() {
       const res = await fetch("/api/detail", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic }),
+        body: JSON.stringify({ topic, platform }),
       });
       const data = (await res.json()) as DetailData;
       setDetails((p) => ({ ...p, [key]: { open: true, loading: false, data } }));
@@ -604,6 +610,7 @@ export default function Home() {
         );
       }
       const topic = extractTopic(line);
+      const platform = extractPlatform(line);
       const key = `${msgIndex}:${li}`;
       const st = details[key];
       return (
@@ -613,7 +620,7 @@ export default function Home() {
               {renderLineWithTags(line, key)}
             </div>
             <button
-              onClick={() => toggleDetail(key, topic)}
+              onClick={() => toggleDetail(key, topic, platform)}
               className="shrink-0 self-start text-[11px] leading-none px-2 py-1 rounded-full border border-indigo-300 text-indigo-500 hover:bg-indigo-50 transition opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
             >
               {st?.open ? "收起" : "查看详情"}
@@ -648,6 +655,16 @@ export default function Home() {
                             className="text-indigo-500 hover:underline truncate"
                           >
                             {s.title}
+                            {s.core && (
+                              <span className="ml-1 align-middle text-[10px] px-1 py-px rounded bg-emerald-100 text-emerald-600">
+                                核心来源
+                              </span>
+                            )}
+                            {s.source && (
+                              <span className="ml-1 text-xs text-gray-400">
+                                — {s.source}
+                              </span>
+                            )}
                           </a>
                         ))}
                       </div>
@@ -676,6 +693,16 @@ export default function Home() {
                             className="text-indigo-500 hover:underline truncate"
                           >
                             {v.title}
+                            {v.core && (
+                              <span className="ml-1 align-middle text-[10px] px-1 py-px rounded bg-emerald-100 text-emerald-600">
+                                核心来源
+                              </span>
+                            )}
+                            {v.source && (
+                              <span className="ml-1 text-xs text-gray-400">
+                                — {v.source}
+                              </span>
+                            )}
                           </a>
                         ))}
                       </div>

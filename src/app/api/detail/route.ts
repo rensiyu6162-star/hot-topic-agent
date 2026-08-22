@@ -25,8 +25,38 @@ async function fetchWithTimeout(
   }
 }
 
-type Link = { title: string; url: string };
+type Link = { title: string; url: string; source: string; core?: boolean };
 type SearchHit = { title: string; url: string; content: string };
+
+// 从 URL 提取来源标签：常见站点给中文友好名，其余显示去掉 www 的主域名
+const SOURCE_NAMES: [RegExp, string][] = [
+  [/baijiahao\.baidu\.com|baidu\.com/, "百家号"],
+  [/zhihu\.com/, "知乎"],
+  [/wenku\.so\.com|so\.com/, "360文库"],
+  [/bilibili\.com|b23\.tv/, "哔哩哔哩"],
+  [/douyin\.com/, "抖音"],
+  [/v\.qq\.com/, "腾讯视频"],
+  [/ixigua\.com/, "西瓜视频"],
+  [/youtube\.com|youtu\.be/, "YouTube"],
+  [/weixin\.qq\.com|mp\.weixin/, "微信公众号"],
+  [/toutiao\.com/, "今日头条"],
+  [/sina\.com|weibo\.com/, "新浪"],
+  [/163\.com/, "网易"],
+  [/sohu\.com/, "搜狐"],
+  [/qq\.com/, "腾讯网"],
+  [/thepaper\.cn/, "澎湃新闻"],
+];
+
+function sourceOf(url: string): string {
+  for (const [re, name] of SOURCE_NAMES) {
+    if (re.test(url)) return name;
+  }
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
 
 // 自建 SearXNG 接口（部署在腾讯云 VPS，中国区 IP）。
 // SEARXNG_URL 例：https://search.example.com 或 http://1.2.3.4:8080
@@ -114,7 +144,11 @@ function rankLoose(lists: SearchHit[][], topic: string, limit: number): Link[] {
       if (seen.has(h.url) || isGenericRef(h.url)) continue;
       seen.add(h.url);
       const s = relevanceScore(`${h.title} ${h.content}`, topic);
-      merged.push({ l: { title: h.title, url: h.url }, s, i: idx++ });
+      merged.push({
+        l: { title: h.title, url: h.url, source: sourceOf(h.url) },
+        s,
+        i: idx++,
+      });
     }
   }
   return merged
@@ -126,18 +160,17 @@ function rankLoose(lists: SearchHit[][], topic: string, limit: number): Link[] {
 
 export async function POST(req: NextRequest) {
   try {
-    const { topic } = await req.json();
+    const { topic, platform } = await req.json();
     if (!topic || typeof topic !== "string") {
       return NextResponse.json({ report: "缺少话题信息。", sites: [], videos: [] });
     }
     const core = cleanTopic(topic);
     const q = encodeURIComponent(core);
 
-    // SearXNG 一次 general + 一次 videos 检索 + LLM 报道
-    const [general, videoRes, report] = await Promise.all([
+    // 先做 SearXNG 检索，拿到真实资料后再据此生成报道（避免 LLM 凭空臆测）
+    const [general, videoRes] = await Promise.all([
       searxSearch(core, "general", 30).catch(() => [] as SearchHit[]),
       searxSearch(core, "videos", 30).catch(() => [] as SearchHit[]),
-      genReport(topic),
     ]);
 
     // 文章：general 结果里排除视频站，排序取前 8 条
@@ -149,13 +182,29 @@ export async function POST(req: NextRequest) {
       8
     );
 
+    // 取相关性最高的若干条作为「核心来源」——既用来喂给报道当依据，也在参考里打标
+    const byUrl = new Map(
+      [...general, ...videoRes].map((h) => [h.url, h] as const)
+    );
+    const coreLinks = [...sites, ...videos].slice(0, 5);
+    const coreUrls = new Set(coreLinks.map((l) => l.url));
+    const groundHits = coreLinks
+      .map((l) => byUrl.get(l.url))
+      .filter((h): h is SearchHit => !!h);
+    sites = sites.map((l) => (coreUrls.has(l.url) ? { ...l, core: true } : l));
+    videos = videos.map((l) => (coreUrls.has(l.url) ? { ...l, core: true } : l));
+
+    // 严格依据核心来源资料生成报道
+    const report = await genReport(topic, platform || "", groundHits);
+
     // 兜底：确实没搜到任何关联内容时才退回搜索页链接
     if (sites.length === 0) {
       sites = [
-        { title: `百度搜索：${core}`, url: `https://www.baidu.com/s?wd=${q}` },
+        { title: `百度搜索：${core}`, url: `https://www.baidu.com/s?wd=${q}`, source: "百度" },
         {
           title: `知乎搜索：${core}`,
           url: `https://www.zhihu.com/search?type=content&q=${q}`,
+          source: "知乎",
         },
       ];
     }
@@ -164,6 +213,7 @@ export async function POST(req: NextRequest) {
         {
           title: `B站搜索：${core}`,
           url: `https://search.bilibili.com/all?keyword=${q}`,
+          source: "哔哩哔哩",
         },
       ];
     }
@@ -177,12 +227,26 @@ export async function POST(req: NextRequest) {
   }
 }
 
-async function genReport(topic: string): Promise<string> {
+async function genReport(
+  topic: string,
+  platform: string,
+  hits: SearchHit[]
+): Promise<string> {
   if (!OPENAI_API_KEY) {
     return `关于「${topic}」的详细报道暂时无法生成，可点击下方参考链接查看更多信息。`;
   }
+  // 用真实搜索到的核心来源当作依据，避免模型对生僻词/网络热词凭空臆测
+  const material = hits
+    .slice(0, 6)
+    .map((h, i) => `${i + 1}. ${h.title}｜${h.content}`.trim())
+    .filter((s) => s.length > 3)
+    .join("\n");
+  const hasMaterial = material.length > 0;
+  const from = platform ? `（来自${platform}热榜）` : "";
+  const prompt = hasMaterial
+    ? `以下是关于热点话题「${topic}」${from}的真实搜索资料（核心来源）：\n${material}\n\n请严格依据上述资料写一段简明的详细报道，说明这个热点具体指什么、事件背景与关键信息。要求：只使用资料中确有的信息，不得臆测或编造；若资料相互矛盾或信息不足，如实说明。控制在 200-300 字，中文，客观清晰，直接成段叙述，不要分点或加标题。`
+    : `请就热点话题「${topic}」${from}写一段简明的详细报道，包含事件背景、关键信息、各方观点或影响。若你并不确定该词的确切含义，请说明「暂无足够公开信息」，不要编造。控制在 200-300 字，中文，客观清晰，直接成段叙述。`;
   try {
-    const prompt = `请就热点话题「${topic}」写一段简明的详细报道，包含：事件背景、关键信息、各方观点或影响。控制在 200-300 字，中文，客观清晰，不要使用标题分段，直接成段叙述。`;
     const res = await fetchWithTimeout(
       `${OPENAI_BASE_URL}/chat/completions`,
       {
