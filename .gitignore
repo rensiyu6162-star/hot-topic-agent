@@ -10,6 +10,7 @@ dist
 *.local
 .env.local
 .env
+tsconfig.tsbuildinfo
 
 # Editor
 .vscode
