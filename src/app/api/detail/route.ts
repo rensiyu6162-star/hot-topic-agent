@@ -26,49 +26,47 @@ async function fetchWithTimeout(
 }
 
 type Link = { title: string; url: string };
+type SearchHit = { title: string; url: string; content: string };
 
-// Bing 的结果链接常被包成跳转 https://www.bing.com/ck/a?...&u=a1<base64url>
-// 需要从 u 参数取出 a1 后的 base64url 解码还原真实地址
-function resolveBingUrl(raw: string): string | null {
-  const url = raw.replace(/&amp;/g, "&");
-  if (!/^https?:\/\//.test(url)) return null;
-  if (!/bing\.com\/ck\//.test(url)) return url; // 非跳转链接，直接返回
-  const m = url.match(/[?&]u=([^&]+)/);
-  if (!m) return null;
-  let token = decodeURIComponent(m[1]);
-  if (token.startsWith("a1")) token = token.slice(2);
-  // base64url -> base64
-  token = token.replace(/-/g, "+").replace(/_/g, "/");
-  while (token.length % 4) token += "=";
-  try {
-    const decoded = Buffer.from(token, "base64").toString("utf-8");
-    return /^https?:\/\//.test(decoded) ? decoded : null;
-  } catch {
-    return null;
-  }
-}
+// 自建 SearXNG 接口（部署在腾讯云 VPS，中国区 IP）。
+// SEARXNG_URL 例：https://search.example.com 或 http://1.2.3.4:8080
+const SEARXNG_URL = (process.env.SEARXNG_URL || "").replace(/\/+$/, "");
+const SEARXNG_TOKEN = process.env.SEARXNG_TOKEN || "";
 
-// 抓取 Bing 网页搜索结果，解析出真实文章链接
-async function bingSearch(query: string, limit: number): Promise<Link[]> {
+// 调用 SearXNG 的 JSON 接口，返回结构化的标题/链接/摘要
+async function searxSearch(
+  query: string,
+  category: "general" | "videos",
+  limit: number
+): Promise<SearchHit[]> {
+  if (!SEARXNG_URL) return [];
+  const u =
+    `${SEARXNG_URL}/search?q=${encodeURIComponent(query)}` +
+    `&format=json&language=zh-CN&safesearch=0&categories=${category}`;
   const res = await fetchWithTimeout(
-    `https://www.bing.com/search?q=${encodeURIComponent(query)}&mkt=zh-CN&setlang=zh-CN&cc=CN`,
-    { headers: { "User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9" } }
+    u,
+    {
+      headers: {
+        "User-Agent": UA,
+        Accept: "application/json",
+        // 反代校验用的共享密钥，防止 SearXNG 被当成公开代理滥用
+        ...(SEARXNG_TOKEN ? { "X-Detail-Token": SEARXNG_TOKEN } : {}),
+      },
+    },
+    9000
   );
-  const html = await res.text();
-  const results: Link[] = [];
+  const json: any = await res.json();
+  const out: SearchHit[] = [];
   const seen = new Set<string>();
-  const re =
-    /<li class="b_algo"[\s\S]*?<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) && results.length < limit) {
-    const url = resolveBingUrl(m[1]);
-    const title = m[2].replace(/<[^>]+>/g, "").trim();
-    if (!title || !url || /bing\.com\/aclick/.test(url) || seen.has(url))
-      continue;
+  for (const r of json?.results || []) {
+    const url: string = r?.url || "";
+    const title: string = (r?.title || "").trim();
+    if (!title || !/^https?:\/\//.test(url) || seen.has(url)) continue;
     seen.add(url);
-    results.push({ title, url });
+    out.push({ title, url, content: (r?.content || "").trim() });
+    if (out.length >= limit) break;
   }
-  return results;
+  return out;
 }
 
 const isVideoUrl = (u: string) =>
@@ -83,9 +81,9 @@ const cleanTopic = (t: string) =>
     .replace(/\s+/g, " ")
     .trim();
 
-// 相关性打分：标题与话题的 2-gram 重合数（完整命中额外加权）。仅用于排序，不作硬性过滤
-function relevanceScore(title: string, topic: string): number {
-  const t = title.replace(/\s+/g, "");
+// 相关性打分：文本（标题+摘要）与话题的 2-gram 重合数（完整命中额外加权）
+function relevanceScore(text: string, topic: string): number {
+  const t = text.replace(/\s+/g, "");
   const kw = topic.replace(/\s+/g, "");
   if (kw.length < 2) return t.includes(kw) ? 1 : 0;
   let score = 0;
@@ -106,20 +104,21 @@ const isGenericRef = (u: string) =>
     u
   );
 
-// 汇总去重 + 剔除百科/搜索页 + 按相关性排序（Bing 原序作为同分次序），取前 limit 条
-function rankLoose(lists: Link[][], topic: string, limit: number): Link[] {
+// 汇总去重 + 剔除百科/搜索页 + 按（标题+摘要）相关性排序，丢弃零重合，取前 limit 条
+function rankLoose(lists: SearchHit[][], topic: string, limit: number): Link[] {
   const seen = new Set<string>();
   const merged: { l: Link; s: number; i: number }[] = [];
   let idx = 0;
   for (const list of lists) {
-    for (const l of list) {
-      if (seen.has(l.url) || isGenericRef(l.url)) continue;
-      seen.add(l.url);
-      merged.push({ l, s: relevanceScore(l.title, topic), i: idx++ });
+    for (const h of list) {
+      if (seen.has(h.url) || isGenericRef(h.url)) continue;
+      seen.add(h.url);
+      const s = relevanceScore(`${h.title} ${h.content}`, topic);
+      merged.push({ l: { title: h.title, url: h.url }, s, i: idx++ });
     }
   }
   return merged
-    .filter((x) => x.s > 0) // 与话题零重合的（多为跑偏的英文/无关结果）直接丢弃
+    .filter((x) => x.s > 0) // 与话题零重合的（跑偏/无关结果）直接丢弃
     .sort((a, b) => b.s - a.s || a.i - b.i)
     .slice(0, limit)
     .map((x) => x.l);
@@ -134,24 +133,18 @@ export async function POST(req: NextRequest) {
     const core = cleanTopic(topic);
     const q = encodeURIComponent(core);
 
-    // 多路检索取更多关联内容 + LLM 报道
-    const [siteA, siteB, vidBili, vidGeneral, report] = await Promise.all([
-      bingSearch(core, 20).catch(() => [] as Link[]),
-      bingSearch(`${core} 事件`, 20).catch(() => [] as Link[]),
-      bingSearch(`${core} site:bilibili.com`, 20).catch(() => [] as Link[]),
-      bingSearch(`${core} 视频`, 20).catch(() => [] as Link[]),
+    // SearXNG 一次 general + 一次 videos 检索 + LLM 报道
+    const [general, videoRes, report] = await Promise.all([
+      searxSearch(core, "general", 30).catch(() => [] as SearchHit[]),
+      searxSearch(core, "videos", 30).catch(() => [] as SearchHit[]),
       genReport(topic),
     ]);
 
-    // 文章：排除视频站，汇总去重+排序，取前 8 条
-    let sites = rankLoose(
-      [siteA, siteB].map((l) => l.filter((s) => !isVideoUrl(s.url))),
-      core,
-      8
-    );
-    // 视频：只保留真实视频页链接，汇总去重+排序，取前 8 条
+    // 文章：general 结果里排除视频站，排序取前 8 条
+    let sites = rankLoose([general.filter((s) => !isVideoUrl(s.url))], core, 8);
+    // 视频：videos 分类结果 + general 里命中的视频链接，排序取前 8 条
     let videos: Link[] = rankLoose(
-      [vidBili, vidGeneral].map((l) => l.filter((v) => isVideoUrl(v.url))),
+      [videoRes, general.filter((s) => isVideoUrl(s.url))],
       core,
       8
     );
