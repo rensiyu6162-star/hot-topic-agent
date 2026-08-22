@@ -937,9 +937,14 @@ export default function Home() {
                 }`}
               >
                 {msg.toolLogs && msg.toolLogs.length > 0 && (
-                  <div className="mb-2 text-xs text-gray-400 border-b pb-2 space-y-0.5">
+                  <div className="mb-2 flex flex-wrap gap-1.5 border-b pb-2">
                     {msg.toolLogs.map((log, j) => (
-                      <div key={j}>🔧 {log}</div>
+                      <span
+                        key={j}
+                        className="inline-flex items-center gap-1 rounded-full bg-gray-100 text-gray-500 text-xs px-2.5 py-0.5 border border-gray-200"
+                      >
+                        🔧 {log}
+                      </span>
                     ))}
                   </div>
                 )}
