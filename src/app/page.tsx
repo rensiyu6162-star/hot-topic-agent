@@ -32,25 +32,31 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // 首次加载：从 localStorage 恢复上次的领域设置
+  // 首次加载：从 localStorage 恢复上次的领域设置与聊天记录
   useEffect(() => {
     try {
       const savedOptions = localStorage.getItem("domainOptions");
       const savedSelected = localStorage.getItem("selectedDomains");
+      const savedMessages = localStorage.getItem("chatMessages");
       if (savedOptions) setDomainOptions(JSON.parse(savedOptions));
       if (savedSelected) setSelectedDomains(JSON.parse(savedSelected));
+      if (savedMessages) {
+        const parsed = JSON.parse(savedMessages);
+        if (Array.isArray(parsed) && parsed.length > 0) setMessages(parsed);
+      }
     } catch {}
     setHydrated(true);
   }, []);
 
-  // 领域设置变化时持久化（恢复完成后才写，避免用默认值覆盖）
+  // 领域设置与聊天记录变化时持久化（恢复完成后才写，避免用默认值覆盖）
   useEffect(() => {
     if (!hydrated) return;
     try {
       localStorage.setItem("domainOptions", JSON.stringify(domainOptions));
       localStorage.setItem("selectedDomains", JSON.stringify(selectedDomains));
+      localStorage.setItem("chatMessages", JSON.stringify(messages));
     } catch {}
-  }, [hydrated, domainOptions, selectedDomains]);
+  }, [hydrated, domainOptions, selectedDomains, messages]);
 
   const togglePlatform = (p: string) => {
     setSelectedPlatforms((prev) =>
@@ -74,6 +80,17 @@ export default function Home() {
     setSelectedDomains((prev) => (prev.includes(d) ? prev : [...prev, d]));
     setDomainInput("");
     setShowDomainInput(false);
+  };
+
+  const clearHistory = () => {
+    const welcome: Message = {
+      role: "assistant",
+      content: `欢迎使用热点抓取 Agent！已默认选中所有平台。\n\n你可以对我说：\n- "帮我抓取今日热点"\n- "根据XX领域筛选热点"\n- "帮我生成视频脚本"`,
+    };
+    setMessages([welcome]);
+    try {
+      localStorage.removeItem("chatMessages");
+    } catch {}
   };
 
   const sendMessage = async (text?: string) => {
@@ -131,6 +148,12 @@ export default function Home() {
       <header className="bg-white border-b px-4 py-3 shadow-sm space-y-2 shrink-0">
         <div className="flex items-center justify-between">
           <span className="text-lg font-bold text-indigo-600">🔥 热点抓取 Agent</span>
+          <button
+            onClick={clearHistory}
+            className="text-xs text-gray-400 border border-gray-200 rounded-lg px-2 py-1 hover:text-red-500 hover:border-red-300 transition"
+          >
+            清空对话
+          </button>
         </div>
 
         {/* 关注领域：多选，默认全选，可叉掉，可 + 添加自定义细分领域 */}
