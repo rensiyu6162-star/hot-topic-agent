@@ -25,11 +25,32 @@ export default function Home() {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // 首次加载：从 localStorage 恢复上次的领域设置
+  useEffect(() => {
+    try {
+      const savedOptions = localStorage.getItem("domainOptions");
+      const savedSelected = localStorage.getItem("selectedDomains");
+      if (savedOptions) setDomainOptions(JSON.parse(savedOptions));
+      if (savedSelected) setSelectedDomains(JSON.parse(savedSelected));
+    } catch {}
+    setHydrated(true);
+  }, []);
+
+  // 领域设置变化时持久化（恢复完成后才写，避免用默认值覆盖）
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem("domainOptions", JSON.stringify(domainOptions));
+      localStorage.setItem("selectedDomains", JSON.stringify(selectedDomains));
+    } catch {}
+  }, [hydrated, domainOptions, selectedDomains]);
 
   const togglePlatform = (p: string) => {
     setSelectedPlatforms((prev) =>
