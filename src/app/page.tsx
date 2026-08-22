@@ -11,7 +11,7 @@ interface Message {
 interface DetailData {
   report: string;
   sites: { title: string; url: string }[];
-  videos: { title: string; url: string }[];
+  videos: { title: string; url: string; app?: string }[];
 }
 
 interface DetailState {
@@ -665,6 +665,14 @@ export default function Home() {
                             href={v.url}
                             target="_blank"
                             rel="noreferrer"
+                            onClick={
+                              v.app
+                                ? (e) => {
+                                    e.preventDefault();
+                                    openVideo(v);
+                                  }
+                                : undefined
+                            }
                             className="text-indigo-500 hover:underline truncate"
                           >
                             {v.title}
@@ -680,6 +688,30 @@ export default function Home() {
         </div>
       );
     });
+  };
+
+  // 打开参考视频：带 app deep link 的（抖音）在移动端先尝试唤起 App，
+  // 约 1.5s 内页面仍可见（说明没跳过去）则回退到移动端搜索页
+  const openVideo = (v: { url: string; app?: string }) => {
+    if (!v.app) {
+      window.open(v.url, "_blank", "noopener");
+      return;
+    }
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    if (!isMobile) {
+      window.open(v.url, "_blank", "noopener");
+      return;
+    }
+    const start = Date.now();
+    const timer = setTimeout(() => {
+      if (!document.hidden && Date.now() - start < 2500) {
+        window.location.href = v.url;
+      }
+    }, 1500);
+    document.addEventListener("visibilitychange", () => clearTimeout(timer), {
+      once: true,
+    });
+    window.location.href = v.app;
   };
 
   return (
