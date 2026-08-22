@@ -723,7 +723,9 @@ export default function Home() {
             >
               ☰
             </button>
-            <span className="text-lg font-bold text-indigo-600 whitespace-nowrap">🔥 热点抓取 Agent</span>
+            <span className="text-base sm:text-lg font-bold text-indigo-600 whitespace-nowrap">
+              <span className="hidden sm:inline">🔥 </span>热点抓取 Agent
+            </span>
 
             {/* 顶部选择区滚出视野后：领域 / 平台 收成下拉入口 */}
             {!selectorsVisible && (
@@ -789,7 +791,7 @@ export default function Home() {
                     领域 / 平台 ▾
                   </button>
                   {openMenu === "both" && (
-                    <div className="absolute left-0 top-full mt-2 z-30 w-72 max-w-[80vw] bg-white border rounded-xl shadow-lg p-3 space-y-3">
+                    <div className="fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+3.5rem)] z-30 bg-white border rounded-xl shadow-lg p-3 space-y-3">
                       <div>
                         <div className="text-xs text-gray-400 mb-2">
                           关注领域（点选中项可叉掉，点 ＋ 添加细分领域）
