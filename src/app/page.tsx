@@ -860,6 +860,8 @@ export default function Home() {
                 className={`rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
                   msg.role === "user"
                     ? "max-w-[85%] bg-indigo-500 text-white"
+                    : msg.content === WELCOME.content
+                    ? "max-w-[85%] bg-white text-gray-800 shadow-sm border"
                     : "w-full bg-white text-gray-800 shadow-sm border"
                 }`}
               >
