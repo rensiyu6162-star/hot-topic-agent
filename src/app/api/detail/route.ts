@@ -218,6 +218,33 @@ export async function POST(req: NextRequest) {
       ];
     }
 
+    // 封闭平台（App 内闭环、爬不到具体内容）——固定追加"站内搜索"跳转入口。
+    // 小红书 / 微博 放在参考网站末尾，抖音 / 快手 放在参考视频末尾。
+    sites.push(
+      {
+        title: `小红书搜索：${core}`,
+        url: `https://www.xiaohongshu.com/search_result?keyword=${q}`,
+        source: "小红书",
+      },
+      {
+        title: `微博搜索：${core}`,
+        url: `https://s.weibo.com/weibo?q=${q}`,
+        source: "微博",
+      }
+    );
+    videos.push(
+      {
+        title: `抖音搜索：${core}`,
+        url: `https://www.douyin.com/search/${q}`,
+        source: "抖音",
+      },
+      {
+        title: `快手搜索：${core}`,
+        url: `https://www.kuaishou.com/search/video?searchKey=${q}`,
+        source: "快手",
+      }
+    );
+
     return NextResponse.json({ report, sites, videos });
   } catch (e: any) {
     return NextResponse.json(
