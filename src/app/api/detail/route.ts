@@ -51,7 +51,7 @@ function resolveBingUrl(raw: string): string | null {
 // 抓取 Bing 网页搜索结果，解析出真实文章链接
 async function bingSearch(query: string, limit: number): Promise<Link[]> {
   const res = await fetchWithTimeout(
-    `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=zh-CN`,
+    `https://www.bing.com/search?q=${encodeURIComponent(query)}&mkt=zh-CN&setlang=zh-CN&cc=CN`,
     { headers: { "User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9" } }
   );
   const html = await res.text();
@@ -119,6 +119,7 @@ function rankLoose(lists: Link[][], topic: string, limit: number): Link[] {
     }
   }
   return merged
+    .filter((x) => x.s > 0) // 与话题零重合的（多为跑偏的英文/无关结果）直接丢弃
     .sort((a, b) => b.s - a.s || a.i - b.i)
     .slice(0, limit)
     .map((x) => x.l);
