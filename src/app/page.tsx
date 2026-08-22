@@ -45,15 +45,6 @@ export default function Home() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState("");
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
-  const [apiKey, setApiKey] = useState("");
-  const [keyInput, setKeyInput] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
-  const [balance, setBalance] = useState<string | null>(null);
-  const [balanceCurrency, setBalanceCurrency] = useState("CNY");
-  const [balanceLoading, setBalanceLoading] = useState(false);
-  const [balanceError, setBalanceError] = useState("");
-  const [keyChecking, setKeyChecking] = useState(false);
-  const [keyCheckMsg, setKeyCheckMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [hydrated, setHydrated] = useState(false);
@@ -80,12 +71,6 @@ export default function Home() {
       const savedSelected = localStorage.getItem("selectedDomains");
       if (savedOptions) setDomainOptions(JSON.parse(savedOptions));
       if (savedSelected) setSelectedDomains(JSON.parse(savedSelected));
-
-      const savedKey = localStorage.getItem("deepseekApiKey");
-      if (savedKey) {
-        setApiKey(savedKey);
-        setKeyInput(savedKey);
-      }
 
       const savedSessions = localStorage.getItem("sessions");
       const savedActive = localStorage.getItem("activeSessionId");
@@ -127,101 +112,6 @@ export default function Home() {
       localStorage.setItem("activeSessionId", activeId);
     } catch {}
   }, [hydrated, domainOptions, selectedDomains, sessions, activeId]);
-
-  // 查询当前 Key 的 DeepSeek 账户余额
-  const fetchBalance = async (key: string) => {
-    const k = key.trim();
-    if (!k) {
-      setBalance(null);
-      setBalanceError("");
-      return;
-    }
-    setBalanceLoading(true);
-    setBalanceError("");
-    try {
-      const res = await fetch("/api/balance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: k }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setBalance(null);
-        setBalanceError(data.error || "查询失败");
-      } else {
-        setBalance(data.totalBalance);
-        setBalanceCurrency(data.currency || "CNY");
-      }
-    } catch {
-      setBalance(null);
-      setBalanceError("查询失败，请稍后重试");
-    } finally {
-      setBalanceLoading(false);
-    }
-  };
-
-  // Key 恢复后自动查一次余额；首次访问未配置 Key 时自动弹出引导
-  useEffect(() => {
-    if (!hydrated) return;
-    if (apiKey) {
-      fetchBalance(apiKey);
-    } else {
-      setShowSettings(true);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated]);
-
-  // 保存并验证 Key：验证通过才关闭弹窗，失败则保留并提示
-  const saveKey = async () => {
-    const k = keyInput.trim();
-    if (!k) {
-      // 空 = 清除密钥
-      setApiKey("");
-      try {
-        localStorage.removeItem("deepseekApiKey");
-      } catch {}
-      setBalance(null);
-      setBalanceError("");
-      setKeyCheckMsg(null);
-      setShowSettings(false);
-      return;
-    }
-    setKeyChecking(true);
-    setKeyCheckMsg(null);
-    try {
-      const res = await fetch("/api/balance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: k }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setKeyCheckMsg({ ok: false, text: data.error || "Key 验证失败，请检查后重试" });
-        return;
-      }
-      // 验证通过：保存并回填余额
-      setApiKey(k);
-      try {
-        localStorage.setItem("deepseekApiKey", k);
-      } catch {}
-      setBalance(data.totalBalance);
-      setBalanceCurrency(data.currency || "CNY");
-      setBalanceError("");
-      setKeyCheckMsg({
-        ok: true,
-        text: `✓ 已连接，当前余额 ¥${data.totalBalance}`,
-      });
-      // 稍作停留让用户看到成功提示，然后关闭
-      setTimeout(() => {
-        setShowSettings(false);
-        setKeyCheckMsg(null);
-      }, 900);
-    } catch {
-      setKeyCheckMsg({ ok: false, text: "网络异常，请稍后重试" });
-    } finally {
-      setKeyChecking(false);
-    }
-  };
 
   const togglePlatform = (p: string) => {
     setSelectedPlatforms((prev) =>
@@ -291,10 +181,6 @@ export default function Home() {
   const sendMessage = async (text?: string) => {
     const msg = text || input.trim();
     if (!msg || loading) return;
-    if (!apiKey.trim()) {
-      setShowSettings(true);
-      return;
-    }
     setInput("");
     const userMsg: Message = { role: "user", content: msg };
     setSessions((prev) =>
@@ -330,7 +216,6 @@ export default function Home() {
           })),
           domain: domainStr,
           platforms: selectedPlatforms,
-          apiKey: apiKey.trim(),
         }),
       });
       const data = await res.json();
@@ -349,7 +234,6 @@ export default function Home() {
       ]);
     } finally {
       setLoading(false);
-      if (apiKey.trim()) fetchBalance(apiKey);
     }
   };
 
@@ -384,123 +268,6 @@ export default function Home() {
               >
                 删除
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 设置：填写自己的 DeepSeek API Key */}
-      {showSettings && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={() => setShowSettings(false)}
-          />
-          <div className="relative z-10 w-full max-w-md bg-white rounded-2xl shadow-xl p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <span className="font-bold text-gray-800">DeepSeek 账户设置</span>
-              <button
-                onClick={() => setShowSettings(false)}
-                className="text-gray-400 hover:text-gray-600 text-lg leading-none"
-              >
-                ✕
-              </button>
-            </div>
-            <p className="text-xs text-gray-500 leading-relaxed">
-              本工具用你<b>自己的 DeepSeek Key</b>，费用从你自己的账户扣除，密钥只存在你本机浏览器。按下面三步操作即可（约 2 分钟）：
-            </p>
-            <ol className="space-y-2 text-sm text-gray-700">
-              <li className="flex items-start gap-2">
-                <span className="shrink-0 w-5 h-5 rounded-full bg-indigo-100 text-indigo-600 text-xs flex items-center justify-center font-medium">1</span>
-                <span className="flex-1">
-                  注册 / 登录 DeepSeek（新账号通常送体验额度）
-                  <a
-                    href="https://platform.deepseek.com/sign_in"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="ml-1 text-indigo-600 underline whitespace-nowrap"
-                  >
-                    去注册登录 ↗
-                  </a>
-                </span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="shrink-0 w-5 h-5 rounded-full bg-indigo-100 text-indigo-600 text-xs flex items-center justify-center font-medium">2</span>
-                <span className="flex-1">
-                  充值（余额不足时再充即可，几元就能用很久）
-                  <a
-                    href="https://platform.deepseek.com/top_up"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="ml-1 text-indigo-600 underline whitespace-nowrap"
-                  >
-                    去充值 ↗
-                  </a>
-                </span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="shrink-0 w-5 h-5 rounded-full bg-indigo-100 text-indigo-600 text-xs flex items-center justify-center font-medium">3</span>
-                <span className="flex-1">
-                  创建 API Key、点「复制」，粘贴到下方输入框
-                  <a
-                    href="https://platform.deepseek.com/api_keys"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="ml-1 text-indigo-600 underline whitespace-nowrap"
-                  >
-                    去创建 Key ↗
-                  </a>
-                </span>
-              </li>
-            </ol>
-            <input
-              type="password"
-              value={keyInput}
-              onChange={(e) => setKeyInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !keyChecking && saveKey()}
-              placeholder="第 3 步复制的 Key，形如 sk-..."
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-            />
-            {keyCheckMsg && (
-              <div
-                className={`text-xs ${
-                  keyCheckMsg.ok ? "text-emerald-600" : "text-red-500"
-                }`}
-              >
-                {keyCheckMsg.text}
-              </div>
-            )}
-            <div className="flex justify-between items-center">
-              <button
-                onClick={() => {
-                  setKeyInput("");
-                  setApiKey("");
-                  try {
-                    localStorage.removeItem("deepseekApiKey");
-                  } catch {}
-                  setBalance(null);
-                  setBalanceError("");
-                  setKeyCheckMsg(null);
-                }}
-                className="text-xs text-gray-400 hover:text-red-500 transition"
-              >
-                清除密钥
-              </button>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setShowSettings(false)}
-                  className="text-sm px-3 py-1.5 rounded-lg border text-gray-600 hover:bg-gray-50 transition"
-                >
-                  取消
-                </button>
-                <button
-                  onClick={saveKey}
-                  disabled={keyChecking}
-                  className="text-sm px-3 py-1.5 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition"
-                >
-                  {keyChecking ? "验证中…" : "保存并连接"}
-                </button>
-              </div>
             </div>
           </div>
         </div>
@@ -599,36 +366,6 @@ export default function Home() {
             <span className="text-lg font-bold text-indigo-600">🔥 热点抓取 Agent</span>
           </div>
           <div className="flex items-center gap-2">
-            {/* 账户余额 */}
-            <div
-              className="text-xs px-2 py-1 rounded-lg border flex items-center gap-1 cursor-pointer select-none"
-              onClick={() => apiKey && fetchBalance(apiKey)}
-              title={apiKey ? "点击刷新余额" : "请先在设置中填写 API Key"}
-            >
-              {!apiKey ? (
-                <span className="text-gray-400">未配置 Key</span>
-              ) : balanceLoading ? (
-                <span className="text-gray-400">查询中…</span>
-              ) : balanceError ? (
-                <span className="text-red-500">余额获取失败</span>
-              ) : balance !== null ? (
-                <span className="text-emerald-600 font-medium">
-                  余额 ¥{balance}
-                </span>
-              ) : (
-                <span className="text-gray-400">点击查询余额</span>
-              )}
-              <span className="text-gray-300">⟳</span>
-            </div>
-            <button
-              onClick={() => {
-                setKeyInput(apiKey);
-                setShowSettings(true);
-              }}
-              className="text-xs text-gray-500 border border-gray-200 rounded-lg px-2 py-1 hover:text-indigo-600 hover:border-indigo-300 transition"
-            >
-              ⚙ 设置
-            </button>
             <button
               onClick={createSession}
               className="text-xs text-indigo-600 border border-indigo-200 rounded-lg px-2 py-1 hover:bg-indigo-50 transition"
