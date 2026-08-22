@@ -517,6 +517,25 @@ export default function Home() {
     );
   };
 
+  // 把正文里 【xxx】 形式的标签渲染成跑道圆形胶囊
+  const renderMessageContent = (content: string) => {
+    const parts = content.split(/(【[^】]*】)/g);
+    return parts.map((part, idx) => {
+      const m = part.match(/^【([^】]*)】$/);
+      if (m) {
+        return (
+          <span
+            key={idx}
+            className="inline-flex items-center rounded-full bg-emerald-50 text-emerald-600 text-xs px-2 py-0.5 border border-emerald-200 mx-0.5 align-middle"
+          >
+            {m[1]}
+          </span>
+        );
+      }
+      return <span key={idx}>{part}</span>;
+    });
+  };
+
   return (
     <main className="h-[100dvh] flex flex-col bg-gray-50 overflow-hidden">
       {/* 删除会话二次确认 */}
@@ -948,7 +967,9 @@ export default function Home() {
                     ))}
                   </div>
                 )}
-                {msg.content}
+                {msg.content === WELCOME.content
+                  ? msg.content
+                  : renderMessageContent(msg.content)}
               </div>
             </div>
           ))}
