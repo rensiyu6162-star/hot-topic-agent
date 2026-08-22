@@ -804,7 +804,7 @@ export default function Home() {
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4">
-        <div className="max-w-3xl mx-auto w-full space-y-4">
+        <div className="max-w-6xl mx-auto w-full space-y-4">
           {messages.map((msg, i) => (
             <div
               key={i}
@@ -842,7 +842,7 @@ export default function Home() {
       {/* Quick Actions */}
       {messages.length <= 1 && (
         <div className="px-4 pb-2">
-          <div className="max-w-3xl mx-auto w-full flex flex-wrap gap-2">
+          <div className="max-w-6xl mx-auto w-full flex flex-wrap gap-2">
             {["帮我抓取今日热点", "筛选相关热点并生成脚本", "有哪些爆款选题"].map(
               (hint) => (
                 <button
@@ -860,7 +860,7 @@ export default function Home() {
 
       {/* Input */}
       <div className="border-t bg-white px-4 py-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-        <div className="flex gap-2 max-w-3xl mx-auto">
+        <div className="flex gap-2 max-w-6xl mx-auto">
           <input
             className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
             placeholder="输入你的需求，例如：帮我看看今天有什么热点"
