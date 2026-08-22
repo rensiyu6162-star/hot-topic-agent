@@ -13,7 +13,10 @@ const DOMAINS = ["科技数码", "职场成长", "美食探店", "娱乐八卦",
 
 export default function Home() {
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([...PLATFORMS]);
-  const [domain, setDomain] = useState("全部");
+  const [domainOptions, setDomainOptions] = useState<string[]>([...DOMAINS]);
+  const [selectedDomains, setSelectedDomains] = useState<string[]>([...DOMAINS]);
+  const [showDomainInput, setShowDomainInput] = useState(false);
+  const [domainInput, setDomainInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
@@ -34,6 +37,24 @@ export default function Home() {
     );
   };
 
+  const toggleDomain = (d: string) => {
+    setSelectedDomains((prev) =>
+      prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]
+    );
+  };
+
+  const addCustomDomain = () => {
+    const d = domainInput.trim();
+    if (!d) {
+      setShowDomainInput(false);
+      return;
+    }
+    setDomainOptions((prev) => (prev.includes(d) ? prev : [...prev, d]));
+    setSelectedDomains((prev) => (prev.includes(d) ? prev : [...prev, d]));
+    setDomainInput("");
+    setShowDomainInput(false);
+  };
+
   const sendMessage = async (text?: string) => {
     const msg = text || input.trim();
     if (!msg || loading) return;
@@ -41,6 +62,15 @@ export default function Home() {
     const userMsg: Message = { role: "user", content: msg };
     setMessages((prev) => [...prev, userMsg]);
     setLoading(true);
+
+    // 全选默认视为“全部领域”，不做重排；否则把选中的领域传给后端
+    const isAllDefault =
+      domainOptions.length === DOMAINS.length &&
+      selectedDomains.length === DOMAINS.length;
+    const domainStr =
+      isAllDefault || selectedDomains.length === 0
+        ? ""
+        : selectedDomains.join("、");
 
     try {
       const res = await fetch("/api/chat", {
@@ -51,7 +81,7 @@ export default function Home() {
             role: m.role,
             content: m.content,
           })),
-          domain: domain === "全部" ? "" : domain,
+          domain: domainStr,
           platforms: selectedPlatforms,
         }),
       });
@@ -77,34 +107,79 @@ export default function Home() {
   return (
     <main className="min-h-screen flex flex-col bg-gray-50">
       {/* Header */}
-      <header className="bg-white border-b px-4 py-3 shadow-sm">
-        <div className="flex items-center justify-between mb-2">
+      <header className="bg-white border-b px-4 py-3 shadow-sm space-y-2">
+        <div className="flex items-center justify-between">
           <span className="text-lg font-bold text-indigo-600">🔥 热点抓取 Agent</span>
-          <select
-            value={domain}
-            onChange={(e) => setDomain(e.target.value)}
-            className="text-sm border rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-400"
-          >
-            <option value="全部">全部领域</option>
-            {DOMAINS.map((d) => (
-              <option key={d} value={d}>{d}</option>
-            ))}
-          </select>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {PLATFORMS.map((p) => (
-            <button
-              key={p}
-              onClick={() => togglePlatform(p)}
-              className={`px-3 py-1 rounded-full text-xs border transition ${
-                selectedPlatforms.includes(p)
-                  ? "bg-indigo-500 text-white border-indigo-500"
-                  : "bg-white text-gray-600 border-gray-300 hover:border-indigo-300"
-              }`}
-            >
-              {p}
-            </button>
-          ))}
+
+        {/* 关注领域：多选，默认全选，可叉掉，可 + 添加自定义细分领域 */}
+        <div>
+          <div className="text-xs text-gray-400 mb-1">
+            关注领域（默认全选，点选中项可叉掉，点 ＋ 添加你感兴趣的细分领域）
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            {domainOptions.map((d) => {
+              const active = selectedDomains.includes(d);
+              return (
+                <button
+                  key={d}
+                  onClick={() => toggleDomain(d)}
+                  className={`px-3 py-1 rounded-full text-xs border transition flex items-center gap-1 ${
+                    active
+                      ? "bg-emerald-500 text-white border-emerald-500"
+                      : "bg-white text-gray-500 border-gray-300 hover:border-emerald-300"
+                  }`}
+                >
+                  <span>{d}</span>
+                  {active && <span className="opacity-80 leading-none">✕</span>}
+                </button>
+              );
+            })}
+            {showDomainInput ? (
+              <input
+                autoFocus
+                value={domainInput}
+                onChange={(e) => setDomainInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") addCustomDomain();
+                  if (e.key === "Escape") {
+                    setShowDomainInput(false);
+                    setDomainInput("");
+                  }
+                }}
+                onBlur={addCustomDomain}
+                placeholder="输入领域后回车"
+                className="px-2 py-1 rounded-full text-xs border border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 w-32"
+              />
+            ) : (
+              <button
+                onClick={() => setShowDomainInput(true)}
+                className="px-3 py-1 rounded-full text-xs border border-dashed border-gray-400 text-gray-500 hover:border-emerald-400 hover:text-emerald-500 transition"
+              >
+                ＋ 添加
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* 抓取平台 */}
+        <div>
+          <div className="text-xs text-gray-400 mb-1">抓取平台</div>
+          <div className="flex flex-wrap gap-2">
+            {PLATFORMS.map((p) => (
+              <button
+                key={p}
+                onClick={() => togglePlatform(p)}
+                className={`px-3 py-1 rounded-full text-xs border transition ${
+                  selectedPlatforms.includes(p)
+                    ? "bg-indigo-500 text-white border-indigo-500"
+                    : "bg-white text-gray-600 border-gray-300 hover:border-indigo-300"
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
         </div>
       </header>
 
