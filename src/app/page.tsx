@@ -699,7 +699,7 @@ export default function Home() {
                             href={s.url}
                             target="_blank"
                             rel="noreferrer"
-                            className="text-indigo-500 hover:underline truncate"
+                            className="text-indigo-500 hover:underline break-words"
                           >
                             {s.title}
                             {s.core && (
@@ -737,7 +737,7 @@ export default function Home() {
                                   }
                                 : undefined
                             }
-                            className="text-indigo-500 hover:underline truncate"
+                            className="text-indigo-500 hover:underline break-words"
                           >
                             {v.title}
                             {v.core && (
