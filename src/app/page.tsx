@@ -505,19 +505,6 @@ export default function Home() {
             ＋ 添加
           </button>
         )}
-        <span className="mx-1 h-4 w-px bg-gray-200" />
-        <button
-          onClick={selectAllDomains}
-          className="px-3 py-1 rounded-full text-xs border border-gray-200 text-gray-500 hover:border-emerald-300 hover:text-emerald-500 transition"
-        >
-          全选
-        </button>
-        <button
-          onClick={clearDomains}
-          className="px-3 py-1 rounded-full text-xs border border-gray-200 text-gray-500 hover:border-emerald-300 hover:text-emerald-500 transition"
-        >
-          清空
-        </button>
       </div>
     );
   };
@@ -545,22 +532,52 @@ export default function Home() {
             </button>
           );
         })}
-        <span className="mx-1 h-4 w-px bg-gray-200" />
+      </div>
+    );
+  };
+
+  // 区块标题（左侧标签 + 右上角 全选/清空）
+  const renderDomainHeader = () => (
+    <div className="flex items-center justify-between mb-2">
+      <span className="text-xs text-gray-400">关注领域</span>
+      <div className="flex items-center gap-2">
         <button
-          onClick={selectAllPlatforms}
-          className="px-3 py-1 rounded-full text-xs border border-gray-200 text-gray-500 hover:border-indigo-300 hover:text-indigo-500 transition"
+          onClick={selectAllDomains}
+          className="text-xs text-gray-400 hover:text-emerald-500 transition"
         >
           全选
         </button>
+        <span className="h-3 w-px bg-gray-200" />
         <button
-          onClick={clearPlatforms}
-          className="px-3 py-1 rounded-full text-xs border border-gray-200 text-gray-500 hover:border-indigo-300 hover:text-indigo-500 transition"
+          onClick={clearDomains}
+          className="text-xs text-gray-400 hover:text-emerald-500 transition"
         >
           清空
         </button>
       </div>
-    );
-  };
+    </div>
+  );
+
+  const renderPlatformHeader = () => (
+    <div className="flex items-center justify-between mb-2">
+      <span className="text-xs text-gray-400">抓取平台</span>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={selectAllPlatforms}
+          className="text-xs text-gray-400 hover:text-indigo-500 transition"
+        >
+          全选
+        </button>
+        <span className="h-3 w-px bg-gray-200" />
+        <button
+          onClick={clearPlatforms}
+          className="text-xs text-gray-400 hover:text-indigo-500 transition"
+        >
+          清空
+        </button>
+      </div>
+    </div>
+  );
 
   // 把一行文字里的 【xxx】 渲染成跑道圆形胶囊
   const renderLineWithTags = (text: string, keyPrefix: string) => {
@@ -1051,7 +1068,8 @@ export default function Home() {
             <span className="text-base sm:text-lg font-bold text-indigo-600 whitespace-nowrap">
               <span className="hidden sm:inline">🔥 </span>热点抓取 Agent
             </span>
-
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
             {/* 顶部选择区滚出视野后：领域 / 平台 收成下拉入口 */}
             {!selectorsVisible && (
               <>
@@ -1071,11 +1089,8 @@ export default function Home() {
                       领域 {selectedDomains.length}/{domainOptions.length} ▾
                     </button>
                     {openMenu === "domain" && (
-                      <div className="absolute left-0 top-full mt-2 z-30 w-72 max-w-[80vw] bg-white border rounded-xl shadow-lg p-3">
-                        <div className="text-xs text-gray-400 mb-2">
-                          关注领域
-
-                        </div>
+                      <div className="absolute right-0 top-full mt-2 z-30 w-72 max-w-[80vw] bg-white border rounded-xl shadow-lg p-3">
+                        {renderDomainHeader()}
                         {renderDomainChips()}
                       </div>
                     )}
@@ -1094,8 +1109,8 @@ export default function Home() {
                       平台 {selectedPlatforms.length}/{PLATFORMS.length} ▾
                     </button>
                     {openMenu === "platform" && (
-                      <div className="absolute left-0 top-full mt-2 z-30 w-72 max-w-[80vw] bg-white border rounded-xl shadow-lg p-3">
-                        <div className="text-xs text-gray-400 mb-2">抓取平台</div>
+                      <div className="absolute right-0 top-full mt-2 z-30 w-72 max-w-[80vw] bg-white border rounded-xl shadow-lg p-3">
+                        {renderPlatformHeader()}
                         {renderPlatformChips()}
                       </div>
                     )}
@@ -1119,14 +1134,11 @@ export default function Home() {
                   {openMenu === "both" && (
                     <div className="fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+3.5rem)] z-30 bg-white border rounded-xl shadow-lg p-3 space-y-3">
                       <div>
-                        <div className="text-xs text-gray-400 mb-2">
-                          关注领域
-
-                        </div>
+                        {renderDomainHeader()}
                         {renderDomainChips()}
                       </div>
                       <div className="border-t pt-3">
-                        <div className="text-xs text-gray-400 mb-2">抓取平台</div>
+                        {renderPlatformHeader()}
                         {renderPlatformChips()}
                       </div>
                     </div>
@@ -1134,8 +1146,6 @@ export default function Home() {
                 </div>
               </>
             )}
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => {
                 setSyncMsg(null);
@@ -1168,11 +1178,11 @@ export default function Home() {
           {/* 顶部完整选择区：滚出视野后才在标题栏出现下拉入口 */}
           <div ref={selectorsRef} className="space-y-2">
             <div>
-              <div className="text-xs text-gray-400 mb-1">关注领域</div>
+              {renderDomainHeader()}
               {renderDomainChips()}
             </div>
             <div>
-              <div className="text-xs text-gray-400 mb-1">抓取平台</div>
+              {renderPlatformHeader()}
               {renderPlatformChips()}
             </div>
           </div>
