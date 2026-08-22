@@ -76,11 +76,14 @@ const isVideoUrl = (u: string) =>
     u
   );
 
-// 去掉书名号/引号/方括号等会干扰搜索分词的符号，得到核心词
+// 去掉书名号/引号/括号/标点等会干扰搜索分词的符号，得到核心词
 const cleanTopic = (t: string) =>
-  t.replace(/[《》「」【】〈〉“”"'`]/g, " ").replace(/\s+/g, " ").trim();
+  t
+    .replace(/[《》「」【】〈〉“”"'`（）()\[\]｜|、，,。.！!？?~—\-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-// 相关性打分：标题与话题的 2-gram 重合数（完整命中额外加权）。0 分视为无关
+// 相关性打分：标题与话题的 2-gram 重合数（完整命中额外加权）。仅用于排序，不作硬性过滤
 function relevanceScore(title: string, topic: string): number {
   const t = title.replace(/\s+/g, "");
   const kw = topic.replace(/\s+/g, "");
@@ -97,12 +100,26 @@ function relevanceScore(title: string, topic: string): number {
   return score;
 }
 
-// 过滤无关结果并按相关性排序
-function rankByRelevance(list: Link[], topic: string, limit: number): Link[] {
-  return list
-    .map((l) => ({ l, s: relevanceScore(l.title, topic) }))
-    .filter((x) => x.s > 0)
-    .sort((a, b) => b.s - a.s)
+// 百科/词典/搜索引擎自身页面——这类不是"事件报道"，一律剔除
+const isGenericRef = (u: string) =>
+  /baike\.baidu\.com|wikipedia\.org|wiki[a-z]*\.|\.wiki|hanyu\.baidu|dict\.|cidian|zhidao\.baidu|zhihu\.com\/topic|so\.com\/link|baidu\.com\/s\?|bing\.com\/search|google\.[a-z.]+\/search/.test(
+    u
+  );
+
+// 汇总去重 + 剔除百科/搜索页 + 按相关性排序（Bing 原序作为同分次序），取前 limit 条
+function rankLoose(lists: Link[][], topic: string, limit: number): Link[] {
+  const seen = new Set<string>();
+  const merged: { l: Link; s: number; i: number }[] = [];
+  let idx = 0;
+  for (const list of lists) {
+    for (const l of list) {
+      if (seen.has(l.url) || isGenericRef(l.url)) continue;
+      seen.add(l.url);
+      merged.push({ l, s: relevanceScore(l.title, topic), i: idx++ });
+    }
+  }
+  return merged
+    .sort((a, b) => b.s - a.s || a.i - b.i)
     .slice(0, limit)
     .map((x) => x.l);
 }
@@ -116,27 +133,29 @@ export async function POST(req: NextRequest) {
     const core = cleanTopic(topic);
     const q = encodeURIComponent(core);
 
-    // 并行：真实文章 + 真实视频 + LLM 报道
-    const [siteRaw, videoRaw, report] = await Promise.all([
-      bingSearch(core, 12).catch(() => [] as Link[]),
-      bingSearch(`${core} site:bilibili.com`, 15).catch(() => [] as Link[]),
+    // 多路检索取更多关联内容 + LLM 报道
+    const [siteA, siteB, vidBili, vidGeneral, report] = await Promise.all([
+      bingSearch(core, 20).catch(() => [] as Link[]),
+      bingSearch(`${core} 事件`, 20).catch(() => [] as Link[]),
+      bingSearch(`${core} site:bilibili.com`, 20).catch(() => [] as Link[]),
+      bingSearch(`${core} 视频`, 20).catch(() => [] as Link[]),
       genReport(topic),
     ]);
 
-    // 文章：排除视频站，按相关性过滤+排序，取前 4 条
-    let sites = rankByRelevance(
-      siteRaw.filter((s) => !isVideoUrl(s.url)),
+    // 文章：排除视频站，汇总去重+排序，取前 8 条
+    let sites = rankLoose(
+      [siteA, siteB].map((l) => l.filter((s) => !isVideoUrl(s.url))),
       core,
-      4
+      8
     );
-    // 视频：只保留真实视频页链接，按相关性过滤+排序，取前 4 条
-    let videos: Link[] = rankByRelevance(
-      videoRaw.filter((v) => isVideoUrl(v.url)),
+    // 视频：只保留真实视频页链接，汇总去重+排序，取前 8 条
+    let videos: Link[] = rankLoose(
+      [vidBili, vidGeneral].map((l) => l.filter((v) => isVideoUrl(v.url))),
       core,
-      4
+      8
     );
 
-    // 兜底：无相关结果时退回搜索页链接，保证不空
+    // 兜底：确实没搜到任何关联内容时才退回搜索页链接
     if (sites.length === 0) {
       sites = [
         { title: `百度搜索：${core}`, url: `https://www.baidu.com/s?wd=${q}` },
