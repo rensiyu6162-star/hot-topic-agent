@@ -214,14 +214,14 @@ async function fetchKuaishouHot(): Promise<any[]> {
       }));
     },
     async () => {
-      // 源2（备用）：百度热搜作为替代
-      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/baidu`);
+      // 源2（备用）：今日头条热榜作为替代（快手无稳定公开接口，/baidu 也已失效）
+      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/toutiao`);
       const json = await res.json();
       const list = json?.data || [];
       if (list.length === 0) throw new Error("empty");
       return list.slice(0, 20).map((item: any, i: number) => ({
         rank: i + 1, title: item.title, url: item.url || "",
-        note: "数据来源：百度热搜（快手接口暂不可用时的替代）",
+        note: "数据来源：今日头条热榜（快手接口暂不可用时的替代）",
       }));
     },
   ], "快手热榜暂时无法获取，建议稍后重试");
@@ -263,6 +263,36 @@ async function fetchBaiduHot(): Promise<any[]> {
       if (list.length === 0) throw new Error("empty");
       return list.slice(0, 20).map((item: any, i: number) => ({
         rank: i + 1, title: item.title, hot: item.hot || 0, url: item.url || "",
+      }));
+    },
+    async () => {
+      // 源2（备用）：百度热搜榜单官方 API（top.baidu.com，国内可直连）
+      const res = await fetchWithTimeout(
+        "https://top.baidu.com/api/board?platform=wise&tab=realtime",
+        { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://top.baidu.com/" } }
+      );
+      const json = await res.json();
+      const list = json?.data?.cards?.[0]?.content || [];
+      if (list.length === 0) throw new Error("empty");
+      return list.slice(0, 20).map((item: any, i: number) => ({
+        rank: i + 1,
+        title: item.word || item.query || "未知",
+        hot: item.hotScore || 0,
+        url:
+          item.rawUrl ||
+          item.url ||
+          `https://www.baidu.com/s?wd=${encodeURIComponent(item.word || "")}`,
+      }));
+    },
+    async () => {
+      // 源3（兜底）：今日头条热榜（百度接口全部失效时的替代）
+      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/toutiao`);
+      const json = await res.json();
+      const list = json?.data || [];
+      if (list.length === 0) throw new Error("empty");
+      return list.slice(0, 20).map((item: any, i: number) => ({
+        rank: i + 1, title: item.title, hot: item.hot || 0, url: item.url || "",
+        note: "数据来源：今日头条热榜（百度接口暂不可用时的替代）",
       }));
     },
   ], "百度热搜暂时无法获取，建议稍后重试");
