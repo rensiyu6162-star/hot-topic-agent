@@ -657,12 +657,6 @@ export default function Home() {
             >
               🔄 {syncCode ? "已同步" : "同步"}
             </button>
-            <button
-              onClick={createSession}
-              className="text-xs text-indigo-600 border border-indigo-200 rounded-lg px-2 py-1 hover:bg-indigo-50 transition"
-            >
-              ＋ 新会话
-            </button>
           </div>
         </div>
 
