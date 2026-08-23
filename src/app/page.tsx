@@ -6,6 +6,7 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   toolLogs?: string[];
+  emptyNote?: string;
 }
 
 interface DetailData {
@@ -521,6 +522,7 @@ export default function Home() {
           role: "assistant",
           content: data.content || "抱歉，出了点问题。",
           toolLogs: data.toolLogs,
+          emptyNote: data.emptyNote || undefined,
         },
       ]);
     } catch {
@@ -1515,6 +1517,12 @@ export default function Home() {
                         : msg.content}
                     </div>
                   </div>
+                  {/* 多领域·未搜到领域的独立气泡：与回答同侧(左)、堆叠在下方，互不重叠 */}
+                  {msg.role === "assistant" && msg.emptyNote && (
+                    <div className="mt-2 max-w-[85%] rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs leading-relaxed text-amber-700 shadow-sm">
+                      {msg.emptyNote}
+                    </div>
+                  )}
                   {/* AI 输出端工具栏常驻；用户输出端悬浮才显示。点删除唤起编辑态 */}
                   {!selectMode && !isWelcome && (
                     <div

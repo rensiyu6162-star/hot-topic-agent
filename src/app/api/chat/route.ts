@@ -694,7 +694,7 @@ async function finalizeFallback(
   } | null,
   userGlossary: Record<string, string> = {},
   allDomains: string[] = []
-): Promise<string> {
+): Promise<{ content: string; emptyNote: string | null }> {
   const raw = content || "";
   // 模型可能仍会输出隐藏标记：现在改为服务端确定性检测，不再依赖它，但仍要清理干净不让用户看到。
   const stripped0 = raw.replace(/\[\[NO_TODAY:[^\]]*\]\]/g, "").trimEnd();
@@ -749,14 +749,19 @@ async function finalizeFallback(
     }
   }
 
-  let result = appendRecentFallback(stripped, fb);
+  const result = appendRecentFallback(stripped, fb);
   if (emptyDomains.length) {
-    // 兑现/收回模型的"系统会自动补充"承诺：确实没搜到就如实说明，不留悬空。
-    result +=
-      `\n\n（近30天检索也未找到与「${emptyDomains.join("、")}」直接相关的内容，` +
-      `可稍后再试或在领域设置里补充更精确的释义。）`;
+    const note =
+      `近30天检索也未找到与「${emptyDomains.join("、")}」直接相关的内容，` +
+      `可稍后再试或在领域设置里补充更精确的释义。`;
+    // 多领域：未搜到的领域单独走一个“气泡”（与回答内容同侧、互不重叠），不塞进正文；
+    // 单领域：保持原行为，直接拼进正文末尾（原来效果好的不动）。
+    if (domainList.length > 1) {
+      return { content: result, emptyNote: note };
+    }
+    return { content: `${result}\n\n（${note}）`, emptyNote: null };
   }
-  return result;
+  return { content: result, emptyNote: null };
 }
 
 function buildSystemPrompt(
@@ -1022,14 +1027,16 @@ export async function POST(req: NextRequest) {
 
       // If no tool calls, return the final text
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+        const fin = await finalizeFallback(
+          assistantMessage.content || "完成。",
+          domain,
+          recentFallback,
+          userGlossary,
+          domainUniverse
+        );
         return NextResponse.json({
-          content: await finalizeFallback(
-            assistantMessage.content || "完成。",
-            domain,
-            recentFallback,
-            userGlossary,
-            domainUniverse
-          ),
+          content: fin.content,
+          emptyNote: fin.emptyNote,
           toolLogs,
         });
       }
@@ -1114,14 +1121,16 @@ export async function POST(req: NextRequest) {
     });
     const finalMsg = await callLLM(conversationMessages, false);
 
+    const fin = await finalizeFallback(
+      finalMsg || "已完成处理。",
+      domain,
+      recentFallback,
+      userGlossary,
+      domainUniverse
+    );
     return NextResponse.json({
-      content: await finalizeFallback(
-        finalMsg || "已完成处理。",
-        domain,
-        recentFallback,
-        userGlossary,
-        domainUniverse
-      ),
+      content: fin.content,
+      emptyNote: fin.emptyNote,
       toolLogs,
     });
   } catch (e: any) {
