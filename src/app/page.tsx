@@ -57,10 +57,16 @@ const genSyncCode = () => {
 const PLATFORMS = ["微博", "知乎", "B站", "抖音", "小红书", "头条", "百度"];
 const DOMAINS = ["科技数码", "职场成长", "美食探店", "娱乐八卦", "财经理财", "健康养生", "教育学习", "旅行出行"];
 
+// 领域最多同时选中的数量：选满后再点会弹窗让用户挑一个替换
+const MAX_DOMAINS = 3;
+
 export default function Home() {
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([...PLATFORMS]);
   const [domainOptions, setDomainOptions] = useState<string[]>([...DOMAINS]);
-  const [selectedDomains, setSelectedDomains] = useState<string[]>([...DOMAINS]);
+  // 默认什么都不选中 → 单纯呈现所有平台 top 热点（保留热点标签，不做领域分类筛选）
+  const [selectedDomains, setSelectedDomains] = useState<string[]>([]);
+  // 选满 MAX_DOMAINS 后再点的那个领域，暂存于此并弹出「替换哪个」弹窗；null=未触发
+  const [replaceCandidate, setReplaceCandidate] = useState<string | null>(null);
   const [showDomainInput, setShowDomainInput] = useState(false);
   const [domainInput, setDomainInput] = useState("");
   // 添加/编辑领域时填写的释义（含义说明），传给后端做精确判定
@@ -163,7 +169,11 @@ export default function Home() {
       const savedSelected = localStorage.getItem("selectedDomains");
       const savedNotes = localStorage.getItem("domainNotes");
       if (savedOptions) setDomainOptions(JSON.parse(savedOptions));
-      if (savedSelected) setSelectedDomains(JSON.parse(savedSelected));
+      if (savedSelected) {
+        const arr = JSON.parse(savedSelected);
+        // 兼容旧数据：以前可能存了全选(8个)，现在上限是 MAX_DOMAINS，超出则截断
+        if (Array.isArray(arr)) setSelectedDomains(arr.slice(0, MAX_DOMAINS));
+      }
       if (savedNotes) setDomainNotes(JSON.parse(savedNotes));
 
       const savedCode = localStorage.getItem("syncCode");
@@ -375,13 +385,8 @@ export default function Home() {
   // ===== 定时任务 =====
   // 与 sendMessage 保持一致地构造当前领域/平台/释义快照，供服务端定时抓取复用
   const buildScheduleSnapshot = () => {
-    const allSelected =
-      selectedDomains.length > 0 &&
-      selectedDomains.length === domainOptions.length;
-    const domain =
-      allSelected || selectedDomains.length === 0
-        ? ""
-        : selectedDomains.join("、");
+    // 与 sendMessage 一致：空选=不锁定领域(呈现全部热点)，选了才逐个过滤
+    const domain = selectedDomains.length === 0 ? "" : selectedDomains.join("、");
     const glossary: Record<string, string> = {};
     for (const d of selectedDomains) {
       const note = domainNotes[d];
@@ -510,16 +515,29 @@ export default function Home() {
   };
 
   const toggleDomain = (d: string) => {
-    setSelectedDomains((prev) => {
-      // 从“全选”状态点某个领域 → 只聚焦它，让每次点击都能明显改变筛选结果
-      const allSelected = prev.length === domainOptions.length;
-      if (allSelected) return [d];
-      if (prev.includes(d)) return prev.filter((x) => x !== d);
-      return [...prev, d];
-    });
+    // 已选中 → 取消选中
+    if (selectedDomains.includes(d)) {
+      setSelectedDomains((prev) => prev.filter((x) => x !== d));
+      return;
+    }
+    // 未选中且已选满上限 → 弹窗让用户挑一个替换
+    if (selectedDomains.length >= MAX_DOMAINS) {
+      setReplaceCandidate(d);
+      return;
+    }
+    // 未选满 → 直接加入
+    setSelectedDomains((prev) => [...prev, d]);
   };
 
-  const selectAllDomains = () => setSelectedDomains([...domainOptions]);
+  // 在「替换哪个」弹窗里点选某个已选领域：用 replaceCandidate 顶掉它
+  const confirmReplaceDomain = (victim: string) => {
+    if (!replaceCandidate) return;
+    setSelectedDomains((prev) =>
+      prev.map((x) => (x === victim ? replaceCandidate : x))
+    );
+    setReplaceCandidate(null);
+  };
+
   const clearDomains = () => setSelectedDomains([]);
   const selectAllPlatforms = () => setSelectedPlatforms([...PLATFORMS]);
   const clearPlatforms = () => setSelectedPlatforms([]);
@@ -680,17 +698,11 @@ export default function Home() {
     setInput("");
 
     // 本轮生效的领域：
-    // - 空选 → 视同全选（默认覆盖所有领域），与「全选」行为完全一致
-    // - 全选 / 部分选中 → 把所选领域【逐个】传给后端，按每个领域过滤 + 近30天兜底
-    //   （不能走"传空=后端不锁定"的旧路径，那样只用 8 个内置标签归类、对自定义/小众领域不覆盖）
-    const effectiveDomains =
-      selectedDomains.length === 0 ? [...domainOptions] : [...selectedDomains];
-    const allSelected =
-      domainOptions.length > 0 &&
-      effectiveDomains.length === domainOptions.length;
-    const domainStr = effectiveDomains.join("、");
-    // 气泡标注：全部领域时太多，用一句"全部领域"代替逐个罗列
-    const stampDomains = allSelected ? ["全部领域"] : effectiveDomains;
+    // - 空选（默认）→ 不锁定领域，单纯呈现所有平台 top 热点（后端仍会打热点标签）
+    // - 选了 1~MAX_DOMAINS 个 → 把所选领域【逐个】传给后端，按领域过滤 + 近30天兜底
+    const domainStr = selectedDomains.join("、");
+    // 气泡标注：空选时不标（就是全部热点），选了才逐个标注
+    const stampDomains = [...selectedDomains];
 
     const userMsg: Message = {
       role: "user",
@@ -712,7 +724,7 @@ export default function Home() {
 
     // 把用户为(生效)自创领域填写的释义一并传给后端，用于精确判定
     const glossary: Record<string, string> = {};
-    for (const d of effectiveDomains) {
+    for (const d of selectedDomains) {
       const note = domainNotes[d];
       if (note && note.trim()) glossary[d] = note.trim();
     }
@@ -833,18 +845,13 @@ export default function Home() {
     );
   };
 
-  // 区块标题（左侧标签 + 右上角 全选/清空）
+  // 区块标题（左侧标签 + 右上角 清空）。领域最多选 MAX_DOMAINS 个，故不再提供「全选」
   const renderDomainHeader = () => (
     <div className="flex items-center justify-between mb-2">
-      <span className="text-xs text-gray-400">关注领域</span>
+      <span className="text-xs text-gray-400">
+        关注领域<span className="text-gray-300">（不选=全部热点，最多选 {MAX_DOMAINS} 个）</span>
+      </span>
       <div className="flex items-center gap-2">
-        <button
-          onClick={selectAllDomains}
-          className="text-xs text-gray-400 hover:text-emerald-500 transition"
-        >
-          全选
-        </button>
-        <span className="h-3 w-px bg-gray-200" />
         <button
           onClick={clearDomains}
           className="text-xs text-gray-400 hover:text-emerald-500 transition"
@@ -1250,6 +1257,40 @@ export default function Home() {
       )}
 
       {/* 添加 / 编辑自定义领域 */}
+      {replaceCandidate && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setReplaceCandidate(null)}
+          />
+          <div className="relative z-10 w-full max-w-sm bg-white rounded-2xl shadow-xl p-5 space-y-4">
+            <div className="font-bold text-gray-800">最多选 {MAX_DOMAINS} 个领域</div>
+            <p className="text-sm text-gray-500">
+              已选满 {MAX_DOMAINS} 个。要把
+              <span className="mx-1 font-medium text-emerald-600">{replaceCandidate}</span>
+              替换掉下面哪一个？
+            </p>
+            <div className="flex flex-col gap-2">
+              {selectedDomains.map((d) => (
+                <button
+                  key={d}
+                  onClick={() => confirmReplaceDomain(d)}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 hover:border-emerald-400 hover:bg-emerald-50 transition text-left"
+                >
+                  替换「{d}」
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setReplaceCandidate(null)}
+              className="w-full px-3 py-2 rounded-lg text-sm text-gray-400 hover:text-gray-600 transition"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
       {showDomainInput && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <div
