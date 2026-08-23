@@ -562,6 +562,7 @@ export default function Home() {
         body: JSON.stringify({ code: scheduleCode }),
       });
       if (res.ok) {
+        // 回到弹窗初始态（与首次打开一致）
         setSchedEnabled(true);
         setSchedEveryDays(1);
         setSchedTimes(["09:00"]);
@@ -569,6 +570,7 @@ export default function Home() {
         setSchedEndDate("");
         setSchedEndEditing(false);
         setSchedEditMode(true);
+        setSchedReplaceCandidate(null);
         setSchedDomains([...selectedDomains].slice(0, MAX_DOMAINS));
         setSchedPlatforms([...selectedPlatforms]);
         setSchedMsg({ ok: true, text: "已删除定时任务" });
