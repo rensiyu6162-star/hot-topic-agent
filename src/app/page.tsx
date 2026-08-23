@@ -680,19 +680,17 @@ export default function Home() {
     setInput("");
 
     // 本轮生效的领域：
-    // - 空选 → 不锁定（后端展示全量并按内置标签归类）
-    // - 全选 / 部分选中 → 都把所选领域【逐个】传给后端，按每个领域过滤 + 近30天兜底。
-    //   （之前"全选=传空"会走后端不锁定路径，只用 8 个内置标签归类、且对自定义/小众领域
-    //    完全不覆盖，导致"选了全部却只剩几个领域"。现在全选=锁定全部领域，逐个覆盖。）
+    // - 空选 → 视同全选（默认覆盖所有领域），与「全选」行为完全一致
+    // - 全选 / 部分选中 → 把所选领域【逐个】传给后端，按每个领域过滤 + 近30天兜底
+    //   （不能走"传空=后端不锁定"的旧路径，那样只用 8 个内置标签归类、对自定义/小众领域不覆盖）
+    const effectiveDomains =
+      selectedDomains.length === 0 ? [...domainOptions] : [...selectedDomains];
     const allSelected =
-      selectedDomains.length > 0 &&
-      selectedDomains.length === domainOptions.length;
-    const sendDomains = selectedDomains.length === 0 ? [] : [...selectedDomains];
-    const domainStr = sendDomains.join("、");
-    // 气泡标注：全选时领域太多，用一句"全部领域"代替逐个罗列；空选不标。
-    const stampDomains = allSelected
-      ? ["全部领域"]
-      : sendDomains;
+      domainOptions.length > 0 &&
+      effectiveDomains.length === domainOptions.length;
+    const domainStr = effectiveDomains.join("、");
+    // 气泡标注：全部领域时太多，用一句"全部领域"代替逐个罗列
+    const stampDomains = allSelected ? ["全部领域"] : effectiveDomains;
 
     const userMsg: Message = {
       role: "user",
@@ -712,9 +710,9 @@ export default function Home() {
     );
     setLoading(true);
 
-    // 把用户为(已选)自创领域填写的释义一并传给后端，用于精确判定
+    // 把用户为(生效)自创领域填写的释义一并传给后端，用于精确判定
     const glossary: Record<string, string> = {};
-    for (const d of selectedDomains) {
+    for (const d of effectiveDomains) {
       const note = domainNotes[d];
       if (note && note.trim()) glossary[d] = note.trim();
     }
