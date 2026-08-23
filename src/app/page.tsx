@@ -1748,23 +1748,22 @@ export default function Home() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span>结束日期</span>
-                    <input
-                      type={schedEndDate ? "date" : "text"}
-                      value={schedEndDate}
-                      min={schedStartDate || undefined}
-                      placeholder="永久运行"
-                      onFocus={(e) => {
-                        e.currentTarget.type = "date";
-                        try {
-                          (e.currentTarget as any).showPicker?.();
-                        } catch {}
-                      }}
-                      onBlur={(e) => {
-                        if (!e.currentTarget.value) e.currentTarget.type = "text";
-                      }}
-                      onChange={(e) => setSchedEndDate(e.target.value)}
-                      className="border rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                    />
+                    <div className="relative inline-flex items-center">
+                      <input
+                        type="date"
+                        value={schedEndDate}
+                        min={schedStartDate || undefined}
+                        onChange={(e) => setSchedEndDate(e.target.value)}
+                        className={`border rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 ${
+                          schedEndDate ? "" : "text-transparent"
+                        }`}
+                      />
+                      {!schedEndDate && (
+                        <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-sm text-gray-400">
+                          永久运行
+                        </span>
+                      )}
+                    </div>
                     {schedEndDate && (
                       <button
                         onClick={() => setSchedEndDate("")}
