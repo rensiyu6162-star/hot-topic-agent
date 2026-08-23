@@ -127,6 +127,8 @@ export default function Home() {
   // 开始日期默认当天，结束日期选填（空=一直执行）
   const [schedStartDate, setSchedStartDate] = useState("");
   const [schedEndDate, setSchedEndDate] = useState("");
+  // 结束日期为空时先展示「持续」，点击后才切换成日期选择器
+  const [schedEndEditing, setSchedEndEditing] = useState(false);
   // 定时任务专属的领域 / 平台选择（与主页面互不影响；打开时默认填充主页面当前选择）
   const [schedDomains, setSchedDomains] = useState<string[]>([]);
   const [schedPlatforms, setSchedPlatforms] = useState<string[]>([]);
@@ -449,6 +451,7 @@ export default function Home() {
     // 默认填充：开始日期=今天、结束日期=空、领域/平台=主页面当前选择
     setSchedStartDate(todayStr());
     setSchedEndDate("");
+    setSchedEndEditing(false);
     setSchedDomains([...selectedDomains].slice(0, MAX_DOMAINS));
     setSchedPlatforms([...selectedPlatforms]);
     if (!scheduleCode) return;
@@ -466,6 +469,7 @@ export default function Home() {
         // 已有配置：回显开始/结束日期与领域/平台
         setSchedStartDate(cfg.anchor || todayStr());
         setSchedEndDate(cfg.endDate || "");
+        setSchedEndEditing(false);
         const snap = cfg.snapshot || {};
         setSchedDomains(
           typeof snap.domain === "string" && snap.domain
@@ -552,6 +556,7 @@ export default function Home() {
         setSchedTimes(["09:00"]);
         setSchedStartDate(todayStr());
         setSchedEndDate("");
+        setSchedEndEditing(false);
         setSchedDomains([...selectedDomains].slice(0, MAX_DOMAINS));
         setSchedPlatforms([...selectedPlatforms]);
         setSchedMsg({ ok: true, text: "已删除定时任务" });
@@ -1696,10 +1701,6 @@ export default function Home() {
 
             {(
               <div className="space-y-4">
-                <p className="text-xs text-gray-500 leading-relaxed">
-                  按设定频率在服务端自动抓取热点（沿用下方选定的领域 / 平台 / 释义），关掉浏览器也会执行，抓完自动回到本设备的「⏰ 定时任务」会话。
-                </p>
-
                 <label className="flex items-center gap-2 text-sm text-gray-700">
                   <input
                     type="checkbox"
@@ -1722,26 +1723,41 @@ export default function Home() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span>结束日期</span>
-                    <input
-                      type="date"
-                      value={schedEndDate}
-                      min={schedStartDate || undefined}
-                      onChange={(e) => setSchedEndDate(e.target.value)}
-                      className="border rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                    />
-                    {schedEndDate && (
+                    {schedEndDate || schedEndEditing ? (
+                      <>
+                        <input
+                          type="date"
+                          value={schedEndDate}
+                          min={schedStartDate || undefined}
+                          autoFocus={schedEndEditing && !schedEndDate}
+                          onChange={(e) => setSchedEndDate(e.target.value)}
+                          onBlur={() => {
+                            if (!schedEndDate) setSchedEndEditing(false);
+                          }}
+                          className="border rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                        />
+                        {schedEndDate && (
+                          <button
+                            onClick={() => {
+                              setSchedEndDate("");
+                              setSchedEndEditing(false);
+                            }}
+                            className="text-xs text-gray-400 hover:text-gray-600"
+                          >
+                            清除
+                          </button>
+                        )}
+                      </>
+                    ) : (
                       <button
-                        onClick={() => setSchedEndDate("")}
-                        className="text-xs text-gray-400 hover:text-gray-600"
+                        onClick={() => setSchedEndEditing(true)}
+                        className="border rounded-lg px-2 py-1 text-sm text-gray-400 hover:border-indigo-300 hover:text-gray-600 transition"
                       >
-                        清除
+                        持续（点击可设结束日期）
                       </button>
                     )}
                   </div>
                 </div>
-                <p className="text-[11px] text-gray-400 -mt-2">
-                  结束日期留空 = 从开始日期起一直执行，不会自动停。
-                </p>
 
                 <div className="flex items-center gap-2 text-sm text-gray-700">
                   <span>频率：每</span>
@@ -1750,7 +1766,7 @@ export default function Home() {
                     onChange={(e) => setSchedEveryDays(Number(e.target.value))}
                     className="border rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-400"
                   >
-                    {Array.from({ length: 30 }, (_, i) => i + 1).map((n) => (
+                    {[1, 2, 3, 5, 7, 14, 30].map((n) => (
                       <option key={n} value={n}>
                         {n}
                       </option>
@@ -1761,7 +1777,7 @@ export default function Home() {
 
                 <div className="space-y-2">
                   <div className="text-sm text-gray-700">
-                    触发时间（最多 3 个 · 北京时间）
+                    触发时间
                   </div>
                   {schedTimes.map((t, i) => (
                     <div key={i} className="flex items-center gap-2">
@@ -1862,18 +1878,18 @@ export default function Home() {
 
                 <div className="flex flex-wrap gap-2 pt-1">
                   <button
-                    onClick={saveSchedule}
-                    disabled={schedBusy}
-                    className="text-sm px-3 py-1.5 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition"
-                  >
-                    {schedBusy ? "处理中…" : "保存"}
-                  </button>
-                  <button
                     onClick={deleteScheduleCfg}
                     disabled={schedBusy}
-                    className="text-sm px-3 py-1.5 rounded-lg border text-gray-400 hover:text-red-500 hover:border-red-300 disabled:opacity-50 transition ml-auto"
+                    className="text-sm px-3 py-1.5 rounded-lg border text-gray-400 hover:text-red-500 hover:border-red-300 disabled:opacity-50 transition"
                   >
                     删除任务
+                  </button>
+                  <button
+                    onClick={saveSchedule}
+                    disabled={schedBusy}
+                    className="text-sm px-3 py-1.5 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition ml-auto"
+                  >
+                    {schedBusy ? "处理中…" : "保存"}
                   </button>
                 </div>
 
@@ -1886,10 +1902,6 @@ export default function Home() {
                     {schedMsg.text}
                   </div>
                 )}
-
-                <p className="text-[11px] text-gray-400 leading-relaxed border-t pt-3">
-                  ⚠️ 定时抓取由服务端常驻进程驱动（部署在 VPS 上生效）；结果会在你下次打开本页面时自动回到本设备。若已启用「同步」，还可在其他设备用同步码查看。
-                </p>
               </div>
             )}
           </div>
