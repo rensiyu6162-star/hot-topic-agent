@@ -137,6 +137,8 @@ export default function Home() {
   // 定时任务里领域选满 MAX_DOMAINS 后再点触发的「替换哪个」弹窗
   const [schedReplaceCandidate, setSchedReplaceCandidate] = useState<string | null>(null);
   const [schedBusy, setSchedBusy] = useState(false);
+  // 删除定时任务的二次确认弹窗开关
+  const [schedConfirmDelete, setSchedConfirmDelete] = useState(false);
   const [schedMsg, setSchedMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [schedLoaded, setSchedLoaded] = useState(false);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -562,7 +564,7 @@ export default function Home() {
         body: JSON.stringify({ code: scheduleCode }),
       });
       if (res.ok) {
-        // 回到弹窗初始态（与首次打开一致）
+        // 回到弹窗初始态（与首次打开一致），随后关闭弹窗
         setSchedEnabled(true);
         setSchedEveryDays(1);
         setSchedTimes(["09:00"]);
@@ -573,12 +575,16 @@ export default function Home() {
         setSchedReplaceCandidate(null);
         setSchedDomains([...selectedDomains].slice(0, MAX_DOMAINS));
         setSchedPlatforms([...selectedPlatforms]);
-        setSchedMsg({ ok: true, text: "已删除定时任务" });
+        setSchedMsg(null);
+        setSchedConfirmDelete(false);
+        setShowSchedule(false);
       } else {
         const data = await res.json();
+        setSchedConfirmDelete(false);
         setSchedMsg({ ok: false, text: data.error || "删除失败" });
       }
     } catch (e: any) {
+      setSchedConfirmDelete(false);
       setSchedMsg({ ok: false, text: `删除失败：${e.message}` });
     } finally {
       setSchedBusy(false);
@@ -1900,7 +1906,7 @@ export default function Home() {
 
                 <div className="flex flex-wrap gap-2 pt-1">
                   <button
-                    onClick={deleteScheduleCfg}
+                    onClick={() => setSchedConfirmDelete(true)}
                     disabled={schedBusy}
                     className="text-sm px-3 py-1.5 rounded-lg border text-gray-400 hover:text-red-500 hover:border-red-300 disabled:opacity-50 transition"
                   >
@@ -1935,6 +1941,40 @@ export default function Home() {
                 )}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* 删除定时任务二次确认 */}
+      {schedConfirmDelete && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setSchedConfirmDelete(false)}
+          />
+          <div className="relative z-10 w-full max-w-xs bg-white rounded-2xl shadow-xl p-5 space-y-4">
+            <div className="space-y-1">
+              <div className="font-bold text-gray-800">删除定时任务</div>
+              <p className="text-sm text-gray-500 leading-relaxed">
+                确定删除当前定时任务吗？删除后配置将被清空，此操作不可撤销。
+              </p>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setSchedConfirmDelete(false)}
+                disabled={schedBusy}
+                className="text-sm px-3 py-1.5 rounded-lg border text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition"
+              >
+                取消
+              </button>
+              <button
+                onClick={deleteScheduleCfg}
+                disabled={schedBusy}
+                className="text-sm px-3 py-1.5 rounded-lg bg-red-500 text-white hover:bg-red-600 disabled:opacity-50 transition"
+              >
+                {schedBusy ? "处理中…" : "删除"}
+              </button>
+            </div>
           </div>
         </div>
       )}
