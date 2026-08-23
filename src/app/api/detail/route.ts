@@ -30,6 +30,8 @@ type SearchHit = { title: string; url: string; content: string };
 
 // 从 URL 提取来源标签：常见站点给中文友好名，其余显示去掉 www 的主域名
 const SOURCE_NAMES: [RegExp, string][] = [
+  [/tieba\.baidu\.com/, "百度贴吧"],
+  [/zhidao\.baidu\.com/, "百度知道"],
   [/baijiahao\.baidu\.com|baidu\.com/, "百家号"],
   [/zhihu\.com/, "知乎"],
   [/wenku\.so\.com|so\.com/, "360文库"],
@@ -261,6 +263,21 @@ export async function POST(req: NextRequest) {
       if (reportHits.length >= 8) break;
     }
 
+    // 一致性保证：报道是【严格依据 reportHits 这几篇资料】生成的，所以这几篇【必须】全部出现在
+    // 用户可见的「参考网站」里，否则会出现"报道引用了参考资料里根本没有的来源（如原帖）"的问题。
+    // 这里把 reportHits 里尚未展示的文章补进 sites（保留已算好的相关性排序与 core 标记，缺的追加到末尾）。
+    const shownSiteUrls = new Set(sites.map((l) => l.url));
+    for (const h of reportHits) {
+      if (isVideoUrl(h.url) || shownSiteUrls.has(h.url)) continue;
+      shownSiteUrls.add(h.url);
+      sites.push({
+        title: h.title,
+        url: h.url,
+        source: sourceOf(h.url),
+        core: coreUrls.has(h.url) || undefined,
+      });
+    }
+
     // 严格依据搜集到的多篇权威来源生成报道
     const report = await genReport(topic, platform || "", reportHits);
 
@@ -333,8 +350,8 @@ async function genReport(
   const hasMaterial = material.length > 0;
   const from = platform ? `（来自${platform}热榜）` : "";
   const prompt = hasMaterial
-    ? `以下是关于热点话题「${topic}」${from}的多篇真实搜索资料（含多个来源）：\n${material}\n\n请你像记者核实新闻一样，对照这几篇来源交叉比对，提炼出多篇来源【一致确认】的事实，写成一段简明清晰的详细报道，说明这个热点具体指什么、事件的来龙去脉与关键信息。硬性要求：\n1. 只写多篇来源共同支撑、可以确定的事实真相，表述要明确、肯定；\n2. 对于个别来源提到但无法确认、或各来源说法冲突的细节，直接【略去不写】，不要把它写进报道；\n3. 【严禁】出现"资料未明确""尚不可知""无法确认""未提供原文""细节不详"这类含糊、留白的措辞——报道里呈现的每一句都应是已核实的确定信息；\n4. 绝对不得臆测或编造资料中没有的内容。\n控制在 200-320 字，中文，客观清晰，直接成段叙述，不要分点、不要加标题。`
-    : `请就热点话题「${topic}」${from}写一段简明的详细报道，包含事件背景、关键信息、各方观点或影响。若你并不确定该词的确切含义，请说明「暂无足够公开信息」，不要编造。控制在 200-300 字，中文，客观清晰，直接成段叙述。`;
+    ? `以下是关于热点话题「${topic}」${from}的多篇真实搜索资料（含多个来源）：\n${material}\n\n请你像记者核实新闻一样，对照这几篇来源交叉比对，提炼出多篇来源【一致确认】的事实，写成一段简明清晰的详细报道，说明这个热点具体指什么、事件的来龙去脉与关键信息。硬性要求：\n1. 只写多篇来源共同支撑、可以确定的事实真相，表述要明确、肯定；\n2. 对于个别来源提到但无法确认、或各来源说法冲突的细节，直接【略去不写】，不要把它写进报道；\n3. 【严禁】出现"资料未明确""尚不可知""无法确认""未提供原文""细节不详"这类含糊、留白的措辞——报道里呈现的每一句都应是已核实的确定信息；\n4. 绝对不得臆测或编造资料中没有的内容；\n5. 【严禁提及上述资料清单之外的任何来源、平台或帖子】——不要写"某贴吧帖子""某讨论帖""可作为……的素材"这类点评式、指向具体出处的话；报道只陈述事件本身，不描述"信息来自哪里"，因为你只能看到上面这几条资料，臆测原始出处会与用户看到的参考链接对不上。\n控制在 200-320 字，中文，客观清晰，直接成段叙述，不要分点、不要加标题、不要罗列来源。`
+    : `请就热点话题「${topic}」${from}写一段简明的详细报道，包含事件背景、关键信息、各方观点或影响。若你并不确定该词的确切含义，请说明「暂无足够公开信息」，不要编造，也不要臆测信息来自某个具体帖子或来源。控制在 200-300 字，中文，客观清晰，直接成段叙述。`;
   try {
     const res = await fetchWithTimeout(
       `${OPENAI_BASE_URL}/chat/completions`,
