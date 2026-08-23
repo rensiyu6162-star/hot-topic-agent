@@ -601,19 +601,25 @@ export default function Home() {
     if (!msg || loading) return;
     setInput("");
 
-    // 本轮生效的领域：全选或空选视为“全部领域”，否则记录锁定的领域集合。
-    // 在此处快照，既随请求发给后端，又盖章到用户消息上，让“切换领域”当轮可见。
+    // 本轮生效的领域：
+    // - 空选 → 不锁定（后端展示全量并按内置标签归类）
+    // - 全选 / 部分选中 → 都把所选领域【逐个】传给后端，按每个领域过滤 + 近30天兜底。
+    //   （之前"全选=传空"会走后端不锁定路径，只用 8 个内置标签归类、且对自定义/小众领域
+    //    完全不覆盖，导致"选了全部却只剩几个领域"。现在全选=锁定全部领域，逐个覆盖。）
     const allSelected =
       selectedDomains.length > 0 &&
       selectedDomains.length === domainOptions.length;
-    const lockedDomains =
-      allSelected || selectedDomains.length === 0 ? [] : [...selectedDomains];
-    const domainStr = lockedDomains.join("、");
+    const sendDomains = selectedDomains.length === 0 ? [] : [...selectedDomains];
+    const domainStr = sendDomains.join("、");
+    // 气泡标注：全选时领域太多，用一句"全部领域"代替逐个罗列；空选不标。
+    const stampDomains = allSelected
+      ? ["全部领域"]
+      : sendDomains;
 
     const userMsg: Message = {
       role: "user",
       content: msg,
-      domains: lockedDomains.length > 0 ? lockedDomains : undefined,
+      domains: stampDomains.length > 0 ? stampDomains : undefined,
     };
     setSessions((prev) =>
       prev.map((s) => {
