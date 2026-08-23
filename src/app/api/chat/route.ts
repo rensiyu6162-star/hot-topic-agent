@@ -195,14 +195,15 @@ async function fetchXiaohongshuHot(): Promise<any[]> {
       }));
     },
     async () => {
-      // 源3：通过今日头条热榜间接获取（头条覆盖面广，含小红书相关内容）
-      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/toutiao`);
+      // 源3：什么值得买热榜（种草/好物/生活方式，与小红书调性最接近，作为替代数据源）
+      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/smzdm`);
       const json = await res.json();
-      const list = json?.data || [];
-      if (list.length === 0) throw new Error("empty");
-      return list.slice(0, 20).map((item: any, i: number) => ({
-        rank: i + 1, title: item.title, url: item.url || "",
-        note: "数据来源：今日头条热榜（小红书暂无直接接口）",
+      const list = Array.isArray(json?.data) ? json.data : [];
+      const items = list.filter((x: any) => (x.title || "").trim());
+      if (items.length < 3) throw new Error("empty");
+      return items.slice(0, 20).map((item: any, i: number) => ({
+        rank: i + 1, title: item.title, url: item.url || item.mobileUrl || "",
+        note: "数据来源：什么值得买热榜（小红书无公开接口，用种草/生活方式内容替代）",
       }));
     },
   ], "小红书热榜暂时无法获取，建议稍后重试");
@@ -362,10 +363,11 @@ function buildSystemPrompt(domain: string, platforms: string[]) {
     ? `用户的创作领域是「${domain}」。`
     : `用户未指定创作领域，如果用户在消息中提到领域相关信息，请据此筛选。`;
   const sortRule = domain
-    ? `- ⚠️ 用户已明确领域「${domain}」：只输出与「${domain}」相关的热点，与该领域完全无关的热点一律不要展示。
-- 相关性判断要「宽松」：只要能从任意角度和「${domain}」扯上关系（哪怕是间接、延伸、话题切入点），就算相关，予以保留。例如领域是「健康养生」，热点「医生说再差的精子都能做试管」——虽然表面是社会新闻，但可延伸到女性试管生育的痛苦/备孕健康，这就算沾边，应当保留。只有真正八竿子打不着的才剔除。
-- 把相关度最高的排在最前面，并在这些条目标题前加 ⭐ 标记；其余相关热点按原热度顺序排在后面。
-- 如果某平台筛选后没有任何相关热点，就如实说明该平台暂无与「${domain}」相关的热点，不要硬凑或编造。`
+    ? `- ⚠️ 用户已明确锁定领域「${domain}」，这是硬性筛选条件：抓取到热点后，你【必须】逐条判断它是否真正属于「${domain}」，只保留真正相关的，其余全部丢弃，绝对不要展示无关热点来凑数。
+- 相关性判断要「从严」：热点的核心话题必须确实落在「${domain}」范围内，或能直接、明确地服务于「${domain}」的创作选题。不要靠牵强的延伸、间接联想来硬凑相关（例如领域是「美食探店」，就不要把机器人、选举、地缘政治等硬扯成相关）。宁可少给，也不要给不相关的。
+- 按相关度从高到低排序，最相关的排最前面，并在标题前加 ⭐ 标记。
+- 如果某平台筛选后确实没有与「${domain}」相关的热点，就如实说明"该平台今日暂无与「${domain}」相关的热点"，不要用无关内容填充。
+- 每个平台筛选后通常保留 3-10 条即可，条数取决于真正相关的有多少，不要为了数量放宽标准。`
     : `- 用户未明确领域：按平台热度原顺序展示即可，不做重排和筛选。`;
   return `你是一个专业的自媒体热点分析 Agent。${domainHint}目标平台是：${platforms.join("、")}。
 
@@ -406,10 +408,10 @@ async function executeTool(
     }
     case "filter_hot_by_domain": {
       // Use LLM to filter topics
-      const filterPrompt = `你是领域筛选助手。从以下热点中，选出与「${args.domain || domain}」领域相关的话题。
-相关性判断要「宽松」：只要能从任意角度（含间接、延伸、话题切入点）和该领域扯上关系就算相关并保留；例如领域「健康养生」，热点「医生说再差的精子都能做试管」可延伸到女性试管生育的痛苦/备孕健康，算沾边，应保留。只剔除真正毫不相关的。
-数量不设固定上限，有几个相关就返回几个（通常 3-8 个），按相关度从高到低排序。
-只返回 JSON 数组，每项包含 rank, title, reason(为什么相关，可以是间接的延伸角度)。
+      const filterPrompt = `你是领域筛选助手。从以下热点中，选出真正属于「${args.domain || domain}」领域的话题。
+相关性判断要「从严」：热点的核心话题必须确实落在该领域范围内，或能直接、明确地服务于该领域的创作选题；不要靠牵强的延伸或间接联想来硬凑相关。宁可少选，也不要选进不相关的。
+数量不设固定上限，有几个真正相关的就返回几个（可能只有 1-2 个，也可能 8 个以上），按相关度从高到低排序；如果一个都不相关，就返回空数组 []。
+只返回 JSON 数组，每项包含 rank, title, reason(为什么真正属于该领域)。
 
 热点列表：
 ${JSON.stringify(args.topics, null, 2)}`;
