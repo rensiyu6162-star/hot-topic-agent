@@ -615,18 +615,24 @@ export default function Home() {
     });
   };
 
-  // 从热点行里提取纯话题标题（去掉序号、⭐、Markdown 星号/井号 和 【】标签）
-  const extractTopic = (line: string) =>
+  // 去掉行首序号和 ⭐，得到"平台｜标题 【标签】"主体
+  const stripLead = (line: string) =>
     line
       .replace(/^\s*\d+[.、)]\s*/, "")
       .replace(/⭐/g, "")
+      .trim();
+
+  // 从热点行里提取纯话题标题（去掉序号、⭐、"平台｜"前缀、【】标签、Markdown 符号）
+  const extractTopic = (line: string) =>
+    stripLead(line)
+      .replace(/^[^｜|【\n]{1,10}[｜|]\s*/, "") // 去掉"平台｜"前缀（若有）
       .replace(/【[^】]*】/g, "")
       .replace(/[*#`]+/g, "")
       .trim();
 
-  // 从热点行里提取平台标签（如 【微博】→ 微博），用于给详情报道标注来源
+  // 从热点行里提取平台（行格式为"序号. 平台｜标题 …"，取 ｜ 前的平台名）
   const extractPlatform = (line: string) => {
-    const m = line.match(/【([^】]*)】/);
+    const m = stripLead(line).match(/^([^｜|【\n]{1,10})[｜|]/);
     return m ? m[1].trim() : "";
   };
 
