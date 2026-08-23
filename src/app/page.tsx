@@ -510,6 +510,7 @@ export default function Home() {
           domain: domainStr,
           platforms: selectedPlatforms,
           glossary,
+          allDomains: domainOptions,
         }),
       });
       const data = await res.json();

@@ -607,6 +607,69 @@ function appendRecentFallback(
   return (content || "").trimEnd() + block;
 }
 
+// 确定性领域白名单强制（根治"切换领域后仍返回旧领域"）：
+// 模型常沿用对话历史里的旧领域集合，把不在当前所选清单里的领域内容也列出来；提示词约束不可靠。
+// 这里在服务端对模型正文做确定性过滤（不依赖模型是否听话）：
+// - 带序号的条目行若【只】打了不在当前所选集合里的领域标签 → 整行删除；
+// - 保留的行里，属于"非当前所选"的多余【标签】一并去掉，只留当前所选的；
+// - "锁定领域：…"声明行按当前所选集合重写；
+// - 仅提及"非当前所选"领域的说明句（如"今日暂无「女性成长」相关热点"）删除。
+// selected = 本次锁定的领域清单；universe = 界面上全部可选领域；offSet = universe 里未被选中的。
+function enforceDomainWhitelist(
+  content: string,
+  selected: string[],
+  universe: string[]
+): string {
+  if (!content || selected.length === 0) return content;
+  const inSet = new Set(selected);
+  const offSet = universe.filter((d) => d && !inSet.has(d));
+  const splitTags = (line: string) =>
+    Array.from(line.matchAll(/【([^】]+)】/g))
+      .flatMap((m) => m[1].split(/[、,，/／\s]+/))
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+  const lines = content.split("\n");
+  const out: string[] = [];
+  for (let line of lines) {
+    // 1) "锁定领域：…"声明行按当前所选集合重写，避免残留旧领域名
+    if (/锁定(创作)?领域/.test(line) && /[：:]/.test(line)) {
+      const idx = line.search(/[：:]/);
+      out.push(`${line.slice(0, idx + 1)}${selected.join(" / ")}`);
+      continue;
+    }
+    const tags = splitTags(line);
+    const isItem = /^\s*\d+[.、)]/.test(line);
+    if (tags.length > 0) {
+      const hasIn = tags.some((t) => inSet.has(t));
+      // 带标签的条目行但不含任何"当前所选领域" → 属于旧领域/臆造领域，删除（不依赖 universe）
+      if (isItem && !hasIn) continue;
+      // 去掉所有"非当前所选"的多余标签（旧领域残留/臆造标签），只保留当前所选的
+      if (hasIn && tags.some((t) => !inSet.has(t))) {
+        line = line.replace(/【([^】]+)】/g, (_full, inner: string) => {
+          const kept = inner
+            .split(/[、,，/／\s]+/)
+            .map((s) => s.trim())
+            .filter((s) => s && inSet.has(s));
+          return kept.length ? kept.map((s) => `【${s}】`).join("") : "";
+        });
+      }
+      out.push(line);
+      continue;
+    }
+    // 2) 无标签行：仅提及"未选领域"的说明句删除（如某平台今日暂无「未选领域」相关热点）
+    if (offSet.length && !isItem) {
+      const mentionsOff = offSet.some((d) => line.includes(d));
+      const mentionsIn = selected.some((d) => line.includes(d));
+      const looksLikeDomainNote =
+        /暂无|没有|无相关|相关热点|该领域|近30天|近三十天/.test(line);
+      if (mentionsOff && !mentionsIn && looksLikeDomainNote) continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 // 收尾兜底（多领域·确定性版）：不再依赖模型输出隐藏标记或自己调工具（多领域时都不可靠），
 // 而是由【服务端逐个领域确定性判断】今日正文里到底有没有它的条目：
 // 判据 = 正文里是否存在【带序号的条目行】且该行打了「【领域】」标签。
@@ -621,22 +684,34 @@ async function finalizeFallback(
     domain: string;
     items: { title: string; url: string; source: string }[];
   } | null,
-  userGlossary: Record<string, string> = {}
+  userGlossary: Record<string, string> = {},
+  allDomains: string[] = []
 ): Promise<string> {
   const raw = content || "";
   // 模型可能仍会输出隐藏标记：现在改为服务端确定性检测，不再依赖它，但仍要清理干净不让用户看到。
-  const stripped = raw.replace(/\[\[NO_TODAY:[^\]]*\]\]/g, "").trimEnd();
+  const stripped0 = raw.replace(/\[\[NO_TODAY:[^\]]*\]\]/g, "").trimEnd();
+  const domainList = domain
+    ? domain
+        .split(/[、，,\/\s]+/)
+        .map((d) => d.trim())
+        .filter(Boolean)
+    : [];
+  // 先做确定性领域白名单强制，剔除历史污染带来的"旧领域"内容，再判断今日兜底。
+  const stripped = domainList.length
+    ? enforceDomainWhitelist(stripped0, domainList, allDomains)
+    : stripped0;
   let fb = recentFallback;
+  // 记录"今日无热点、且近30天也没搜到"的领域，避免模型承诺了"以下为近30天内容"却什么都没有。
+  const emptyDomains: string[] = [];
 
-  if (domain && domain.trim()) {
-    const domainList = domain
-      .split(/[、，,\/\s]+/)
-      .map((d) => d.trim())
-      .filter(Boolean);
-    // 收集正文里所有"带序号条目行"，用于判断某领域今日是否真有条目
+  if (domainList.length) {
+    // 收集正文里所有"真正的带序号条目行"，用于判断某领域今日是否真有条目。
+    // ⚠️"暂无/没有/近30天"这类说明句即使被模型写成带序号或带标签，也不算今日热点，否则会误判 hasToday 而跳过兜底。
+    const isNoContentDecl = (line: string) =>
+      /暂无|没有|无相关|未找到|近30天|近三十天|以下为近/.test(line);
     const itemLines = stripped
       .split("\n")
-      .filter((line) => /^\s*\d+[.、)]/.test(line));
+      .filter((line) => /^\s*\d+[.、)]/.test(line) && !isNoContentDecl(line));
     for (const d of domainList) {
       // 该领域今日已有条目（某带序号行打了【d】标签）→ 今日有热点，跳过，不补兜底
       const hasToday = itemLines.some((line) => line.includes(`【${d}】`));
@@ -648,7 +723,10 @@ async function finalizeFallback(
         DOMAIN_GLOSSARY.find((g) => g.test.test(d))?.note ||
         "";
       const items = await findRecentByDomain(d, 12, note);
-      if (items.length === 0) continue;
+      if (items.length === 0) {
+        emptyDomains.push(d);
+        continue;
+      }
       if (!fb) fb = { domain: "", items: [] };
       const seen = new Set(fb.items.map((x) => x.url));
       for (const it of items) {
@@ -663,7 +741,14 @@ async function finalizeFallback(
     }
   }
 
-  return appendRecentFallback(stripped, fb);
+  let result = appendRecentFallback(stripped, fb);
+  if (emptyDomains.length) {
+    // 兑现/收回模型的"系统会自动补充"承诺：确实没搜到就如实说明，不留悬空。
+    result +=
+      `\n\n（近30天检索也未找到与「${emptyDomains.join("、")}」直接相关的内容，` +
+      `可稍后再试或在领域设置里补充更精确的释义。）`;
+  }
+  return result;
 }
 
 function buildSystemPrompt(
@@ -840,9 +925,13 @@ async function callLLM(
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages, domain, platforms, glossary } = await req.json();
+    const { messages, domain, platforms, glossary, allDomains } = await req.json();
     const userGlossary: Record<string, string> =
       glossary && typeof glossary === "object" ? glossary : {};
+    // 界面上全部可选领域（用于确定性剔除"未选领域"内容，根治历史污染导致的旧领域残留）
+    const domainUniverse: string[] = Array.isArray(allDomains)
+      ? allDomains.filter((x: unknown): x is string => typeof x === "string")
+      : [];
 
     if (!OPENAI_API_KEY) {
       return NextResponse.json({
@@ -905,7 +994,8 @@ export async function POST(req: NextRequest) {
             assistantMessage.content || "完成。",
             domain,
             recentFallback,
-            userGlossary
+            userGlossary,
+            domainUniverse
           ),
           toolLogs,
         });
@@ -968,7 +1058,8 @@ export async function POST(req: NextRequest) {
         finalMsg || "已完成处理。",
         domain,
         recentFallback,
-        userGlossary
+        userGlossary,
+        domainUniverse
       ),
       toolLogs,
     });
