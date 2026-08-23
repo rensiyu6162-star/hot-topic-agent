@@ -533,8 +533,16 @@ async function findRecentByDomain(
   // 原始领域词（如"反bl"）本身之前就能搜到很多结果，必须始终保留并优先检索。
   // 再补上：内置词表的相关宽词（若命中）+ LLM 基于名称/释义的通用展开。去重。
   // 内置词表已充分覆盖且用户没填释义时，跳过 LLM 展开以省开销；否则一律做通用展开。
+  // 描述性中文短语（如「bg与bl大战」「原生家庭」「女性成长」）本身就是精准的检索短语，
+  // 直接搜原短语就能命中真正在讨论该话题的内容。此前对这类领域也做通用关键词展开，
+  // 展开出的宽泛单词（如「耽美」「bl」「小说」）会把大量跑题的小说/词条 spam 冲进结果，
+  // 正是用户反馈"检索内容和原意差别很大、以前好现在不行"的根因（回归）。
+  // 因此：无释义的描述性中文短语【只搜原短语】，不再做通用展开，恢复此前的干净检索效果。
+  // （填了释义的、命中内置词表的、或纯拉丁缩写的窄领域，仍照常展开——它们确实需要。）
+  const isDescriptivePhrase =
+    /[\u4e00-\u9fff]/.test(d) && d.replace(/\s/g, "").length >= 4;
   let expanded: string[] = [];
-  if (!hit || note.trim()) {
+  if ((!hit || note.trim()) && !(isDescriptivePhrase && !note.trim())) {
     expanded = await expandDomainKeywords(d, note);
   }
   // 原始领域词只有在"自身就有明确检索意义"时才直接搜：无释义时照搜；有释义但原始词是纯拉丁短缩写
@@ -932,6 +940,13 @@ export async function POST(req: NextRequest) {
     const domainUniverse: string[] = Array.isArray(allDomains)
       ? allDomains.filter((x: unknown): x is string => typeof x === "string")
       : [];
+    // 本次锁定的领域清单（唯一权威）。模型有时会用对话历史里的【旧领域】去调
+    // search_recent_topics_by_domain，其近30天结果若混进回复就是"切换领域后仍返回旧领域"的
+    // 一条泄漏路径（这些兜底条目无标签，enforceDomainWhitelist 也删不掉）。用它在收集处过滤。
+    const currentDomainList: string[] = (typeof domain === "string" ? domain : "")
+      .split(/[、，,\/\s]+/)
+      .map((d: string) => d.trim())
+      .filter(Boolean);
 
     if (!OPENAI_API_KEY) {
       return NextResponse.json({
@@ -1019,7 +1034,19 @@ export async function POST(req: NextRequest) {
         if (fnName === "search_recent_topics_by_domain") {
           try {
             const parsed = JSON.parse(result);
-            if (Array.isArray(parsed?.items) && parsed.items.length > 0) {
+            const dm = (parsed.domain || "").toString().trim();
+            // 只接受【当前锁定领域】的兜底结果：模型可能沿用历史里的旧领域来调这个工具，
+            // 那些旧领域的近30天条目一旦拼进回复，就是"切换领域后仍返回旧领域"。
+            // 当前清单为空（未锁定领域）时不设限，保持原行为。
+            const domainAllowed =
+              currentDomainList.length === 0 ||
+              !dm ||
+              currentDomainList.includes(dm);
+            if (
+              domainAllowed &&
+              Array.isArray(parsed?.items) &&
+              parsed.items.length > 0
+            ) {
               if (!recentFallback) recentFallback = { domain: "", items: [] };
               const seen = new Set(recentFallback.items.map((x) => x.url));
               for (const it of parsed.items) {
@@ -1028,7 +1055,6 @@ export async function POST(req: NextRequest) {
                   recentFallback.items.push(it);
                 }
               }
-              const dm = (parsed.domain || "").toString().trim();
               if (dm && !recentFallback.domain.split("、").includes(dm)) {
                 recentFallback.domain = recentFallback.domain
                   ? `${recentFallback.domain}、${dm}`
