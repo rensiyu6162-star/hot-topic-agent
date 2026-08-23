@@ -1822,7 +1822,12 @@ export default function Home() {
                   ))}
                   {schedTimes.length < 3 && (
                     <button
-                      onClick={() => setSchedTimes([...schedTimes, "12:00"])}
+                      onClick={() =>
+                        setSchedTimes([
+                          ...schedTimes,
+                          schedTimes.length >= 2 ? "16:00" : "12:00",
+                        ])
+                      }
                       className="text-xs text-indigo-500 hover:text-indigo-600"
                     >
                       + 添加时间
