@@ -39,12 +39,14 @@ function hostLabel(url: string): string {
 // 用 SearXNG（time_range=month）检索该领域近一个月内的相关内容作为兜底。
 async function searxRecentSearch(
   query: string,
-  limit = 12
+  limit = 12,
+  timeRange: "day" | "week" | "month" | "year" | "" = "month"
 ): Promise<{ title: string; url: string; source: string }[]> {
   if (!SEARXNG_URL) return [];
+  const tr = timeRange ? `&time_range=${timeRange}` : "";
   const u =
     `${SEARXNG_URL}/search?q=${encodeURIComponent(query)}` +
-    `&format=json&language=zh-CN&safesearch=0&time_range=month&categories=general`;
+    `&format=json&language=zh-CN&safesearch=0${tr}&categories=general`;
   const res = await fetchWithTimeout(
     u,
     {
@@ -434,12 +436,68 @@ const TOOLS = [
 // ========== System Prompt ==========
 
 // 含义不明确/小众/缩写型领域词的精确释义，避免模型自行臆测宽泛含义而滥打标签
-const DOMAIN_GLOSSARY: { test: RegExp; note: string }[] = [
+// queries：用于近30天兜底检索的真实世界关键词。领域词本身可能是用户自造的窄词
+// （如「反bl」现实中没人会这么写标题），必须展开成人们真正会用的措辞去 SearXNG 检索。
+const DOMAIN_GLOSSARY: { test: RegExp; note: string; queries?: string[] }[] = [
   {
     test: /反\s*bl|反耽美|反\s*boys?['']?\s*love/i,
     note: "特指反对/批评「男男同性恋爱（BL / 耽美 / Boys' Love）」题材的内容，比如反对耽改剧、BL 小说、BL 同人、腐文化等。判定要极窄：只有当热点的核心话题就是在讨论 BL / 耽美这类题材本身（或明确反对这类题材）时才打这个标签。女性成长、女性权益、职场、婚恋、诈骗、社会新闻等，只要不是在直接讲 BL / 耽美题材，就【绝对不要】打【反bl】。更不要把「反bl」臆测成'反被规训 / 反凝视 / 反刻板印象'之类的宽泛含义去硬套到大量热点上。",
+    queries: [
+      "耽改剧 下架",
+      "耽美 整改",
+      "抵制 耽美",
+      "腐文化 争议",
+      "BL 影视 争议",
+      "反对 耽改",
+      "耽美 danmei 争议",
+    ],
   },
 ];
+
+// 近30天兜底：把领域词映射到真实检索关键词（命中 glossary 用其 queries，否则退回领域词本身），
+// 逐个跑 searxRecentSearch 聚合去重；若近一个月结果太少（<3 条），自动放宽到近一年再补。
+async function findRecentByDomain(
+  domain: string,
+  limit = 12
+): Promise<{ title: string; url: string; source: string }[]> {
+  const d = domain.trim();
+  if (!d) return [];
+  const hit = DOMAIN_GLOSSARY.find((g) => g.test.test(d));
+  const queries = hit?.queries?.length ? hit.queries : [d];
+
+  const collect = async (
+    timeRange: "month" | "year"
+  ): Promise<{ title: string; url: string; source: string }[]> => {
+    const merged: { title: string; url: string; source: string }[] = [];
+    const seen = new Set<string>();
+    for (const q of queries) {
+      const items = await searxRecentSearch(q, limit, timeRange);
+      for (const it of items) {
+        if (it.url && !seen.has(it.url)) {
+          seen.add(it.url);
+          merged.push(it);
+        }
+      }
+      if (merged.length >= limit) break;
+    }
+    return merged.slice(0, limit);
+  };
+
+  let out = await collect("month");
+  if (out.length < 3) {
+    // 近一个月太少，放宽到近一年兜底
+    const yearItems = await collect("year");
+    const seen = new Set(out.map((x) => x.url));
+    for (const it of yearItems) {
+      if (it.url && !seen.has(it.url)) {
+        seen.add(it.url);
+        out.push(it);
+      }
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
 
 function buildSystemPrompt(domain: string, platforms: string[]) {
   const domainHint = domain
@@ -562,7 +620,7 @@ ${JSON.stringify(args.topics, null, 2)}`;
       const d = (args.domain || domain || "").toString().trim();
       if (!d)
         return JSON.stringify({ domain: "", range: "近30天", realtime: false, items: [] });
-      const items = await searxRecentSearch(d, 12);
+      const items = await findRecentByDomain(d, 12);
       return JSON.stringify(
         { domain: d, range: "近30天", realtime: false, items },
         null,
