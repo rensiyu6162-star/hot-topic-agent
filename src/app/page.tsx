@@ -26,6 +26,12 @@ interface Session {
   messages: Message[];
 }
 
+// 近30天兜底：小众领域今日无实时热点时，后端返回的近30天相关内容，用气泡框提示用户
+interface RecentFallback {
+  domain: string;
+  items: { title: string; url: string; source: string }[];
+}
+
 const WELCOME: Message = {
   role: "assistant",
   content: `欢迎使用热点抓取 Agent！已默认选中所有平台。\n\n你可以对我说：\n- "帮我抓取今日热点"\n- "根据XX领域筛选热点"\n- "帮我生成视频脚本"`,
@@ -88,6 +94,8 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   // 每条热点的「查看详情」展开状态（key = 消息序号:行号）
   const [details, setDetails] = useState<Record<string, DetailState>>({});
+  // 近30天兜底提示气泡框（小众领域今日无实时热点时弹出）
+  const [recentBubble, setRecentBubble] = useState<RecentFallback | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectorsRef = useRef<HTMLDivElement>(null);
@@ -439,6 +447,10 @@ export default function Home() {
           toolLogs: data.toolLogs,
         },
       ]);
+      // 后端返回了近30天兜底内容 → 弹出气泡框提示用户
+      if (data.recentFallback && data.recentFallback.items?.length > 0) {
+        setRecentBubble(data.recentFallback as RecentFallback);
+      }
     } catch {
       setActiveMessages((prev) => [
         ...prev,
@@ -1280,6 +1292,56 @@ export default function Home() {
           ))}
         </div>
       </div>
+
+      {/* 近30天兜底气泡框：小众领域今日无实时热点时弹出提示 */}
+      {recentBubble && (
+        <div className="fixed z-50 right-4 bottom-28 sm:bottom-32 w-[min(22rem,calc(100vw-2rem))]">
+          <div className="relative rounded-2xl bg-white shadow-2xl border border-emerald-200 p-4">
+            {/* 气泡尾巴 */}
+            <div className="absolute -bottom-2 right-8 w-4 h-4 bg-white border-b border-r border-emerald-200 rotate-45" />
+            <button
+              onClick={() => setRecentBubble(null)}
+              className="absolute top-2 right-2 text-gray-300 hover:text-gray-500 text-sm leading-none"
+              title="关闭"
+            >
+              ✕
+            </button>
+            <div className="flex items-start gap-2 pr-4">
+              <span className="text-lg leading-none">📌</span>
+              <div className="text-sm text-gray-700 leading-snug">
+                今日暂无「
+                <span className="font-semibold text-emerald-600">
+                  {recentBubble.domain}
+                </span>
+                」实时热点，已为你找到
+                <span className="font-semibold text-emerald-600">
+                  近30天 {recentBubble.items.length} 条
+                </span>
+                相关内容：
+              </div>
+            </div>
+            <div className="mt-3 max-h-56 overflow-y-auto flex flex-col gap-1.5 pr-1">
+              {recentBubble.items.map((it, k) => (
+                <a
+                  key={k}
+                  href={it.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block text-xs text-indigo-500 hover:bg-indigo-50 rounded-lg px-2 py-1.5 break-words leading-snug"
+                >
+                  {it.title}
+                  {it.source && (
+                    <span className="ml-1 text-gray-400">— {it.source}</span>
+                  )}
+                </a>
+              ))}
+            </div>
+            <div className="mt-2 text-[11px] text-gray-400 text-right">
+              近30天相关内容 · 非今日实时热榜
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Input */}
       <div className="border-t bg-white px-4 py-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom))]">

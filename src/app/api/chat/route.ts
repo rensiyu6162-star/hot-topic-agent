@@ -6,6 +6,10 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "deepseek-chat";
 // 本地 DailyHotApi 地址（需先部署，见说明）
 const DAILYHOT_BASE = process.env.DAILYHOT_BASE_URL || "http://localhost:6688";
 
+// 自建 SearXNG（部署在腾讯云 VPS）——小众领域今日无实时热点时，用它检索近30天内容兜底
+const SEARXNG_URL = (process.env.SEARXNG_URL || "").replace(/\/+$/, "");
+const SEARXNG_TOKEN = process.env.SEARXNG_TOKEN || "";
+
 // ========== 带超时的 fetch ==========
 async function fetchWithTimeout(url: string, options: any = {}, timeout = 8000): Promise<Response> {
   const controller = new AbortController();
@@ -21,6 +25,59 @@ async function fetchWithTimeout(url: string, options: any = {}, timeout = 8000):
 }
 
 // ========== Platform Fetchers ==========
+
+// URL → 简明来源标签（近30天兜底结果里给用户看来源用）
+function hostLabel(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+// 近30天搜索式发现：某锁定领域今日各平台实时热榜筛选后无相关热点时，
+// 用 SearXNG（time_range=month）检索该领域近一个月内的相关内容作为兜底。
+async function searxRecentSearch(
+  query: string,
+  limit = 12
+): Promise<{ title: string; url: string; source: string }[]> {
+  if (!SEARXNG_URL) return [];
+  const u =
+    `${SEARXNG_URL}/search?q=${encodeURIComponent(query)}` +
+    `&format=json&language=zh-CN&safesearch=0&time_range=month&categories=general`;
+  const res = await fetchWithTimeout(
+    u,
+    {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        Accept: "application/json",
+        // 反代校验用的共享密钥
+        ...(SEARXNG_TOKEN ? { "X-Detail-Token": SEARXNG_TOKEN } : {}),
+      },
+    },
+    9000
+  );
+  const json: any = await res.json();
+  const out: { title: string; url: string; source: string }[] = [];
+  const seen = new Set<string>();
+  for (const r of json?.results || []) {
+    const url: string = r?.url || "";
+    const title: string = (r?.title || "").trim();
+    if (!title || !/^https?:\/\//.test(url) || seen.has(url)) continue;
+    // 跳过百科/词典/搜索引擎自身页面，只留真正的报道/内容
+    if (
+      /baike\.baidu\.com|wikipedia\.org|zhihu\.com\/topic|baidu\.com\/s\?|bing\.com\/search|google\.[a-z.]+\/search/.test(
+        url
+      )
+    )
+      continue;
+    seen.add(url);
+    out.push({ title, url, source: hostLabel(url) });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
 
 // 通用：按优先级依次尝试多个数据源，全部失败返回错误提示
 async function tryFetchSources(sources: (() => Promise<any[]>)[], platform: string): Promise<any[]> {
@@ -355,6 +412,24 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "search_recent_topics_by_domain",
+      description:
+        "当某个已锁定的小众/垂直领域（如「反bl」）在今日各平台实时热榜里【逐条筛选后一条相关的都没有】时，用它检索该领域近一个月（近30天）内的相关内容作为兜底，返回近30天相关话题列表。仅在今日实时热榜确实无该领域相关热点时调用。",
+      parameters: {
+        type: "object",
+        properties: {
+          domain: {
+            type: "string",
+            description: "要检索近30天内容的领域词，例如「反bl」",
+          },
+        },
+        required: ["domain"],
+      },
+    },
+  },
 ];
 // ========== System Prompt ==========
 
@@ -411,13 +486,14 @@ function buildSystemPrompt(domain: string, platforms: string[]) {
   return `你是一个专业的自媒体热点分析 Agent。${domainHint}目标平台是：${platforms.join("、")}。
 ${
   domain
-    ? `\n🔒【领域锁定 = 最高优先级，凌驾于用户本次说法之上】用户已在界面锁定创作领域「${domain}」。这是一个持续生效的硬性过滤器：无论用户这次说的是"抓取热点""抓今日热点""全量热榜""原始热点"还是任何类似说法，你最终展示给用户的内容都【必须】只保留真正属于「${domain}」的热点，其余一律丢弃、不得出现。抓取阶段可以照常抓全量，但【展示前必须按领域过滤】。绝对不允许因为用户说了"抓取/全量/原始/不做额外操作"就把所有平台的热点原样堆出来——那是错误行为。\n- ⚠️【当前领域集合是唯一权威，以本条为准】本次锁定的领域【完整清单】就是：${domainList.map((d) => `「${d}」`).join("、")}，共 ${domainList.length} 个。用户随时可能在界面上增删领域，所以【对话历史里出现过的领域组合可能已经过期】。你【必须】以本条系统提示里的这份清单为准，对清单里的【每一个】领域都主动去抓取、筛选、归类——包括刚新增的领域。绝对不要沿用你之前回复里用过的旧领域集合。\n- ⚠️【每次抓取都要真跑，禁止偷懒复用】只要用户要求抓取/刷新/再来一次，你就【必须】重新调用 fetch_hot_topics 并按当前完整领域清单重新过滤，输出全新结果。【严禁】回复"无变化""仍是N条""数据没更新""内容重复""与其让你等待"这类话，也【严禁】直接把上一轮的列表原样再贴一遍——因为用户很可能刚改动了所选领域，"无变化"几乎一定是错的。\n`
+    ? `\n🔒【领域锁定 = 最高优先级，凌驾于用户本次说法之上】用户已在界面锁定创作领域「${domain}」。这是一个持续生效的硬性过滤器：无论用户这次说的是"抓取热点""抓今日热点""全量热榜""原始热点"还是任何类似说法，你最终展示给用户的内容都【必须】只保留真正属于「${domain}」的热点，其余一律丢弃、不得出现。抓取阶段可以照常抓全量，但【展示前必须按领域过滤】。绝对不允许因为用户说了"抓取/全量/原始/不做额外操作"就把所有平台的热点原样堆出来——那是错误行为。\n- ⚠️【当前领域集合是唯一权威，以本条为准】本次锁定的领域【完整清单】就是：${domainList.map((d) => `「${d}」`).join("、")}，共 ${domainList.length} 个。用户随时可能在界面上增删领域，所以【对话历史里出现过的领域组合可能已经过期】。你【必须】以本条系统提示里的这份清单为准，对清单里的【每一个】领域都主动去抓取、筛选、归类——包括刚新增的领域。绝对不要沿用你之前回复里用过的旧领域集合。\n- ⚠️【每次抓取都要真跑，禁止偷懒复用】只要用户要求抓取/刷新/再来一次，你就【必须】重新调用 fetch_hot_topics 并按当前完整领域清单重新过滤，输出全新结果。【严禁】回复"无变化""仍是N条""数据没更新""内容重复""与其让你等待"这类话，也【严禁】直接把上一轮的列表原样再贴一遍——因为用户很可能刚改动了所选领域，"无变化"几乎一定是错的。\n- 🆕【小众领域今日无热点时，自动做近30天兜底】如果某个锁定领域（尤其是小众/垂直领域，如「反bl」）在今日各平台实时热榜里【逐条筛选后一条相关的都没有】，你【必须】调用 search_recent_topics_by_domain(domain) 检索该领域近30天内的相关内容作为兜底，把它作为「近30天相关话题」补充给用户，并在回复里明确标注这些是"📌 近30天相关内容（非今日实时热榜）"。不要因为今日没热点就只回一句"暂无相关热点"草草了事。\n`
     : ""
 }
 你的能力：
 1. fetch_hot_topics: 从微博、知乎、B站、抖音、小红书、头条、百度抓取实时热点
 2. filter_hot_by_domain: 用 AI 判断哪些热点和用户领域相关
 3. generate_video_script: 根据热点生成短视频脚本（Hook → 痛点 → 内容 → CTA）
+4. search_recent_topics_by_domain: 小众/垂直领域今日实时热榜无相关热点时，检索该领域近30天内容做兜底
 
 工作流程：
 - 用户说"抓热点"时，依次调用各平台的 fetch_hot_topics${
@@ -482,6 +558,17 @@ ${JSON.stringify(args.topics, null, 2)}`;
       const scriptRes = await callLLM([{ role: "user", content: scriptPrompt }], false);
       return scriptRes;
     }
+    case "search_recent_topics_by_domain": {
+      const d = (args.domain || domain || "").toString().trim();
+      if (!d)
+        return JSON.stringify({ domain: "", range: "近30天", realtime: false, items: [] });
+      const items = await searxRecentSearch(d, 12);
+      return JSON.stringify(
+        { domain: d, range: "近30天", realtime: false, items },
+        null,
+        2
+      );
+    }
     default:
       return JSON.stringify({ error: `未知工具: ${name}` });
   }
@@ -535,6 +622,12 @@ export async function POST(req: NextRequest) {
 
     let conversationMessages = [systemMsg, ...messages];
     const toolLogs: string[] = [];
+    // 近30天兜底：小众领域今日无热点时，search_recent_topics_by_domain 的结果收集到这里，
+    // 随响应一起返回给前端，用「气泡框」提示用户。
+    let recentFallback: {
+      domain: string;
+      items: { title: string; url: string; source: string }[];
+    } | null = null;
     const MAX_ITERATIONS = 5;
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -552,6 +645,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({
           content: assistantMessage.content || "完成。",
           toolLogs,
+          recentFallback,
         });
       }
 
@@ -565,9 +659,32 @@ export async function POST(req: NextRequest) {
           fnArgs = JSON.parse(toolCall.function.arguments || "{}");
         } catch {}
 
-        toolLogs.push(`调用 ${fnName}(${fnArgs.platform || fnArgs.topic || ""})`);
+        toolLogs.push(`调用 ${fnName}(${fnArgs.platform || fnArgs.topic || fnArgs.domain || ""})`);
 
         const result = await executeTool(fnName, fnArgs, domain);
+
+        // 收集近30天兜底结果（可能针对多个小众领域被调用多次，合并去重）
+        if (fnName === "search_recent_topics_by_domain") {
+          try {
+            const parsed = JSON.parse(result);
+            if (Array.isArray(parsed?.items) && parsed.items.length > 0) {
+              if (!recentFallback) recentFallback = { domain: "", items: [] };
+              const seen = new Set(recentFallback.items.map((x) => x.url));
+              for (const it of parsed.items) {
+                if (it?.url && !seen.has(it.url)) {
+                  seen.add(it.url);
+                  recentFallback.items.push(it);
+                }
+              }
+              const dm = (parsed.domain || "").toString().trim();
+              if (dm && !recentFallback.domain.split("、").includes(dm)) {
+                recentFallback.domain = recentFallback.domain
+                  ? `${recentFallback.domain}、${dm}`
+                  : dm;
+              }
+            }
+          } catch {}
+        }
 
         conversationMessages.push({
           role: "tool",
@@ -587,6 +704,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       content: finalMsg || "已完成处理。",
       toolLogs,
+      recentFallback,
     });
   } catch (e: any) {
     return NextResponse.json(
