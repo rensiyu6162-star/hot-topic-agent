@@ -454,8 +454,11 @@ const DOMAIN_GLOSSARY: { test: RegExp; note: string; queries?: string[] }[] = [
   },
 ];
 
-// 近30天兜底：把领域词映射到真实检索关键词（命中 glossary 用其 queries，否则退回领域词本身），
-// 逐个跑 searxRecentSearch 聚合去重；若近一个月结果太少（<3 条），自动放宽到近一年再补。
+// 兜底发现：把领域词拆解成一组相关检索词（命中 glossary 用其 queries，如「反bl」→反耽美/耽改剧下架/抵制耽美…；
+// 否则退回领域词本身），逐个跑 SearXNG 聚合去重。
+// ⚠️ SearXNG 的 time_range 过滤很激进：很多引擎不返回日期，会被 time_range 直接过滤成 0 条——
+// 这正是"一个月都没有返回结果"的根因。所以这里【渐进放宽】：近一个月 → 近一年 → 不限时间，
+// 只要总量还不够就继续放宽，保证能拿到相关内容。
 async function findRecentByDomain(
   domain: string,
   limit = 12
@@ -466,7 +469,7 @@ async function findRecentByDomain(
   const queries = hit?.queries?.length ? hit.queries : [d];
 
   const collect = async (
-    timeRange: "month" | "year"
+    timeRange: "month" | "year" | ""
   ): Promise<{ title: string; url: string; source: string }[]> => {
     const merged: { title: string; url: string; source: string }[] = [];
     const seen = new Set<string>();
@@ -483,20 +486,57 @@ async function findRecentByDomain(
     return merged.slice(0, limit);
   };
 
-  let out = await collect("month");
-  if (out.length < 3) {
-    // 近一个月太少，放宽到近一年兜底
-    const yearItems = await collect("year");
-    const seen = new Set(out.map((x) => x.url));
-    for (const it of yearItems) {
+  // 渐进放宽：近一个月 → 近一年 → 不限时间，累计去重，够 3 条就停。
+  const out: { title: string; url: string; source: string }[] = [];
+  const seen = new Set<string>();
+  for (const tr of ["month", "year", ""] as const) {
+    const batch = await collect(tr);
+    for (const it of batch) {
       if (it.url && !seen.has(it.url)) {
         seen.add(it.url);
         out.push(it);
       }
       if (out.length >= limit) break;
     }
+  if (out.length >= 3) break; // 已经拿到足够结果，不再继续放宽
   }
-  return out;
+  return out.slice(0, limit);
+}
+
+// 兜底安全网：模型有时嘴上说"该领域今日无热点"却【没真的调用】兜底工具，导致气泡框不出现。
+// 这里对每个"已锁定且命中内置小众词表"的领域（如「反bl」）主动补跑一次拆词检索，
+// 把结果并入 recentFallback，保证只要有相关内容，气泡框就一定会出现。
+async function ensureNicheFallback(
+  domain: string,
+  current: {
+    domain: string;
+    items: { title: string; url: string; source: string }[];
+  } | null
+) {
+  const domainList = (domain || "")
+    .split(/[、，,\/\s]+/)
+    .map((d) => d.trim())
+    .filter(Boolean);
+  let fb = current;
+  for (const d of domainList) {
+    const hit = DOMAIN_GLOSSARY.find((g) => g.test.test(d));
+    if (!hit) continue; // 只对内置小众词表里的领域主动兜底
+    if (fb && fb.domain.split("、").includes(d)) continue; // 模型已针对该领域补过
+    const items = await findRecentByDomain(d, 12);
+    if (items.length === 0) continue;
+    if (!fb) fb = { domain: "", items: [] };
+    const seen = new Set(fb.items.map((x) => x.url));
+    for (const it of items) {
+      if (it.url && !seen.has(it.url)) {
+        seen.add(it.url);
+        fb.items.push(it);
+      }
+    }
+    if (!fb.domain.split("、").includes(d)) {
+      fb.domain = fb.domain ? `${fb.domain}、${d}` : d;
+    }
+  }
+  return fb;
 }
 
 function buildSystemPrompt(
@@ -711,6 +751,8 @@ export async function POST(req: NextRequest) {
 
       // If no tool calls, return the final text
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+        // 安全网：小众领域即使模型没调兜底工具，也主动补一次拆词检索
+        recentFallback = await ensureNicheFallback(domain, recentFallback);
         return NextResponse.json({
           content: assistantMessage.content || "完成。",
           toolLogs,
@@ -769,6 +811,9 @@ export async function POST(req: NextRequest) {
       content: "请总结以上所有工具调用的结果，给出最终回复。",
     });
     const finalMsg = await callLLM(conversationMessages, false);
+
+    // 安全网：小众领域即使模型没调兜底工具，也主动补一次拆词检索
+    recentFallback = await ensureNicheFallback(domain, recentFallback);
 
     return NextResponse.json({
       content: finalMsg || "已完成处理。",
