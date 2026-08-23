@@ -533,6 +533,8 @@ export default function Home() {
             ? `已保存：${rangeText}，每 ${schedEveryDays} 天于 ${times.join("、")} 自动抓取热点，结果会自动回到本设备`
             : "已保存（定时任务已停用）",
         });
+        // 保存成功后自动关闭弹窗（稍留时间让用户看到提示）
+        setTimeout(() => setShowSchedule(false), 900);
       } else {
         setSchedMsg({ ok: false, text: data.error || "保存失败" });
       }
