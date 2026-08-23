@@ -585,7 +585,7 @@ async function findRecentByDomain(
 
 // 兜底安全网：模型有时嘴上说"该领域今日无热点"却【没真的调用】兜底工具，导致气泡框不出现。
 // 这里对每个"已锁定、且属于小众/自定义领域"的领域主动补跑一次拆词检索，把结果并入 recentFallback，
-// 保证只要有相关内容气泡框就一定出现。触发范围：命中内置词表（如「反bl」）或用户填了释义的自定义领域。
+// 保证只要有相关内容，就一定会拼进回复正文兜底展示。触发范围：命中内置词表（如「反bl」）或用户填了释义的自定义领域。
 async function ensureNicheFallback(
   domain: string,
   current: {
@@ -620,6 +620,30 @@ async function ensureNicheFallback(
     }
   }
   return fb;
+}
+
+// 把近30天兜底结果直接拼进最终回复正文（不再用气泡框）。
+// 条目按"序号. 来源｜标题"格式输出，和今日热点列表同构，
+// 前端 renderAssistantContent 会自动给每条挂"查看详情"按钮。
+function appendRecentFallback(
+  content: string,
+  fb: {
+    domain: string;
+    items: { title: string; url: string; source: string }[];
+  } | null
+): string {
+  if (!fb || !fb.items || fb.items.length === 0) return content;
+  const domainLabel = fb.domain || "该领域";
+  const lines = fb.items.map((it, i) => {
+    const src = (it.source || "").trim();
+    const title = (it.title || "").trim();
+    return `${i + 1}. ${src ? `${src}｜` : ""}${title}`;
+  });
+  const block =
+    `\n\n---\n📌 今日各平台实时热榜暂无与「${domainLabel}」直接相关的热点，` +
+    `以下是近30天内检索到的 ${fb.items.length} 条相关内容（非今日实时热榜，仅供参考）：\n\n` +
+    lines.join("\n");
+  return (content || "").trimEnd() + block;
 }
 
 function buildSystemPrompt(
@@ -674,7 +698,7 @@ function buildSystemPrompt(
   return `你是一个专业的自媒体热点分析 Agent。${domainHint}目标平台是：${platforms.join("、")}。
 ${
   domain
-    ? `\n🔒【领域锁定 = 最高优先级，凌驾于用户本次说法之上】用户已在界面锁定创作领域「${domain}」。这是一个持续生效的硬性过滤器：无论用户这次说的是"抓取热点""抓今日热点""全量热榜""原始热点"还是任何类似说法，你最终展示给用户的内容都【必须】只保留真正属于「${domain}」的热点，其余一律丢弃、不得出现。抓取阶段可以照常抓全量，但【展示前必须按领域过滤】。绝对不允许因为用户说了"抓取/全量/原始/不做额外操作"就把所有平台的热点原样堆出来——那是错误行为。\n- ⚠️【当前领域集合是唯一权威，以本条为准】本次锁定的领域【完整清单】就是：${domainList.map((d) => `「${d}」`).join("、")}，共 ${domainList.length} 个。用户随时可能在界面上增删领域，所以【对话历史里出现过的领域组合可能已经过期】。你【必须】以本条系统提示里的这份清单为准，对清单里的【每一个】领域都主动去抓取、筛选、归类——包括刚新增的领域。绝对不要沿用你之前回复里用过的旧领域集合。\n- ⚠️【每次抓取都要真跑，禁止偷懒复用】只要用户要求抓取/刷新/再来一次，你就【必须】重新调用 fetch_hot_topics 并按当前完整领域清单重新过滤，输出全新结果。【严禁】回复"无变化""仍是N条""数据没更新""内容重复""与其让你等待"这类话，也【严禁】直接把上一轮的列表原样再贴一遍——因为用户很可能刚改动了所选领域，"无变化"几乎一定是错的。\n- 🆕【小众领域今日无热点时，自动做近30天兜底】如果某个锁定领域（尤其是小众/垂直领域，如「反bl」）在今日各平台实时热榜里【逐条筛选后一条相关的都没有】，你【必须】调用 search_recent_topics_by_domain(domain) 检索该领域近30天内的相关内容作为兜底，把它作为「近30天相关话题」补充给用户，并在回复里明确标注这些是"📌 近30天相关内容（非今日实时热榜）"。不要因为今日没热点就只回一句"暂无相关热点"草草了事。\n`
+    ? `\n🔒【领域锁定 = 最高优先级，凌驾于用户本次说法之上】用户已在界面锁定创作领域「${domain}」。这是一个持续生效的硬性过滤器：无论用户这次说的是"抓取热点""抓今日热点""全量热榜""原始热点"还是任何类似说法，你最终展示给用户的内容都【必须】只保留真正属于「${domain}」的热点，其余一律丢弃、不得出现。抓取阶段可以照常抓全量，但【展示前必须按领域过滤】。绝对不允许因为用户说了"抓取/全量/原始/不做额外操作"就把所有平台的热点原样堆出来——那是错误行为。\n- ⚠️【当前领域集合是唯一权威，以本条为准】本次锁定的领域【完整清单】就是：${domainList.map((d) => `「${d}」`).join("、")}，共 ${domainList.length} 个。用户随时可能在界面上增删领域，所以【对话历史里出现过的领域组合可能已经过期】。你【必须】以本条系统提示里的这份清单为准，对清单里的【每一个】领域都主动去抓取、筛选、归类——包括刚新增的领域。绝对不要沿用你之前回复里用过的旧领域集合。\n- ⚠️【每次抓取都要真跑，禁止偷懒复用】只要用户要求抓取/刷新/再来一次，你就【必须】重新调用 fetch_hot_topics 并按当前完整领域清单重新过滤，输出全新结果。【严禁】回复"无变化""仍是N条""数据没更新""内容重复""与其让你等待"这类话，也【严禁】直接把上一轮的列表原样再贴一遍——因为用户很可能刚改动了所选领域，"无变化"几乎一定是错的。\n- 🆕【小众领域今日无热点时，自动做近30天兜底】如果某个锁定领域（尤其是小众/垂直领域，如「反bl」）在今日各平台实时热榜里【逐条筛选后一条相关的都没有】，你【必须】调用 search_recent_topics_by_domain(domain) 检索该领域近30天内的相关内容作为兜底。但是【重要】：你自己【不要】把这些近30天条目一条条列出来，也【不要】写"📌 近30天相关内容"之类的小标题——系统会在你回复的末尾【自动追加】这份近30天列表并加好说明。你只需要用一句话说明"今日各平台实时热榜暂无「${domain}」相关热点，以下为近30天相关内容"即可，剩下的列表交给系统追加，避免重复。不要因为今日没热点就只回一句"暂无相关热点"草草了事。\n`
     : ""
 }
 你的能力：
@@ -837,7 +861,7 @@ export async function POST(req: NextRequest) {
     }
     const toolLogs: string[] = [];
     // 近30天兜底：小众领域今日无热点时，search_recent_topics_by_domain 的结果收集到这里，
-    // 随响应一起返回给前端，用「气泡框」提示用户。
+    // 最终由 appendRecentFallback 直接拼进回复正文（不再用气泡框）。
     let recentFallback: {
       domain: string;
       items: { title: string; url: string; source: string }[];
@@ -859,9 +883,11 @@ export async function POST(req: NextRequest) {
         // 安全网：小众领域即使模型没调兜底工具，也主动补一次拆词检索
         recentFallback = await ensureNicheFallback(domain, recentFallback, userGlossary);
         return NextResponse.json({
-          content: assistantMessage.content || "完成。",
+          content: appendRecentFallback(
+            assistantMessage.content || "完成。",
+            recentFallback
+          ),
           toolLogs,
-          recentFallback,
         });
       }
 
@@ -921,9 +947,8 @@ export async function POST(req: NextRequest) {
     recentFallback = await ensureNicheFallback(domain, recentFallback, userGlossary);
 
     return NextResponse.json({
-      content: finalMsg || "已完成处理。",
+      content: appendRecentFallback(finalMsg || "已完成处理。", recentFallback),
       toolLogs,
-      recentFallback,
     });
   } catch (e: any) {
     return NextResponse.json(
