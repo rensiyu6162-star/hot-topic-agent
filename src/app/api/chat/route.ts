@@ -163,11 +163,18 @@ async function fetchXiaohongshuHot(): Promise<any[]> {
         },
       });
       const json = await res.json();
-      const list = json?.data?.items || json?.data || [];
-      if (list.length === 0) throw new Error("empty");
-      return list.slice(0, 20).map((item: any, i: number) => ({
-        rank: i + 1, title: item.title || item.name || item.word || "未知",
-        url: item.url || `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(item.title || item.name || item.word || "")}`,
+      const list = Array.isArray(json?.data?.items)
+        ? json.data.items
+        : Array.isArray(json?.data)
+        ? json.data
+        : [];
+      const items = list
+        .map((item: any) => item.title || item.name || item.word || "")
+        .filter((t: string) => t.trim());
+      if (items.length < 3) throw new Error("empty");
+      return items.slice(0, 20).map((title: string, i: number) => ({
+        rank: i + 1, title,
+        url: `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(title)}`,
       }));
     },
     async () => {
@@ -180,8 +187,8 @@ async function fetchXiaohongshuHot(): Promise<any[]> {
       const text = await res.text();
       // 尝试从页面中提取热搜关键词
       const matches = [...text.matchAll(/"keyword":"(.*?)"/g)];
-      if (matches.length === 0) throw new Error("empty");
-      const unique = [...new Set(matches.map(m => m[1]))];
+      const unique = [...new Set(matches.map(m => m[1]))].filter(t => t.trim());
+      if (unique.length < 5) throw new Error("empty");
       return unique.slice(0, 20).map((title: string, i: number) => ({
         rank: i + 1, title,
         url: `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(title)}`,
@@ -233,9 +240,10 @@ async function fetchBaiduHot(): Promise<any[]> {
       // 源1：本地 DailyHotApi
       const res = await fetchWithTimeout(`${DAILYHOT_BASE}/baidu`);
       const json = await res.json();
-      const list = json?.data || [];
-      if (list.length === 0) throw new Error("empty");
-      return list.slice(0, 20).map((item: any, i: number) => ({
+      const list = Array.isArray(json?.data) ? json.data : [];
+      const items = list.filter((x: any) => (x.title || "").trim());
+      if (items.length < 3) throw new Error("empty");
+      return items.slice(0, 20).map((item: any, i: number) => ({
         rank: i + 1, title: item.title, hot: item.hot || 0, url: item.url || "",
       }));
     },
@@ -246,16 +254,24 @@ async function fetchBaiduHot(): Promise<any[]> {
         { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://top.baidu.com/" } }
       );
       const json = await res.json();
-      const list = json?.data?.cards?.[0]?.content || [];
-      if (list.length === 0) throw new Error("empty");
-      return list.slice(0, 20).map((item: any, i: number) => ({
+      // cards[].content 里可能直接是词条，也可能再嵌一层 content
+      const raw: any[] = [];
+      for (const card of json?.data?.cards || []) {
+        for (const sub of card?.content || []) {
+          if (sub?.word || sub?.query) raw.push(sub);
+          else if (Array.isArray(sub?.content)) raw.push(...sub.content);
+        }
+      }
+      const items = raw.filter((x: any) => x.word || x.query);
+      if (items.length < 3) throw new Error("empty");
+      return items.slice(0, 20).map((item: any, i: number) => ({
         rank: i + 1,
-        title: item.word || item.query || "未知",
+        title: item.word || item.query,
         hot: item.hotScore || 0,
         url:
           item.rawUrl ||
           item.url ||
-          `https://www.baidu.com/s?wd=${encodeURIComponent(item.word || "")}`,
+          `https://www.baidu.com/s?wd=${encodeURIComponent(item.word || item.query || "")}`,
       }));
     },
     async () => {
