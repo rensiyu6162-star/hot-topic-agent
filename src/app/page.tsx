@@ -672,10 +672,11 @@ export default function Home() {
 
   const renderDomainChips = (autoFocusInput = false) => {
     void autoFocusInput;
-    // 保持 domainOptions 原始顺序，不做“选中优先”重排——
-    // 否则每次点选，被点的芯片都会跳到最前面，造成视觉抖动 + 误点，
-    // 让人觉得“切换迟钝、点不准”。
-    const ordered = domainOptions;
+    // 选中的领域前置、未选的沉到后面；各组内部保持 domainOptions 原始顺序（组内稳定，避免同组乱跳）。
+    const ordered = [
+      ...domainOptions.filter((d) => selectedDomains.includes(d)),
+      ...domainOptions.filter((d) => !selectedDomains.includes(d)),
+    ];
     return (
       <div className="flex flex-wrap gap-2 items-center">
         {ordered.map((d) => {
