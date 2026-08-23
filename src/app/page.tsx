@@ -100,6 +100,15 @@ export default function Home() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedMsgs, setSelectedMsgs] = useState<number[]>([]);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  // 设置菜单（同步 / 定时任务）
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [schedEnabled, setSchedEnabled] = useState(true);
+  const [schedEveryDays, setSchedEveryDays] = useState(1);
+  const [schedTimes, setSchedTimes] = useState<string[]>(["09:00"]);
+  const [schedBusy, setSchedBusy] = useState(false);
+  const [schedMsg, setSchedMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [schedLoaded, setSchedLoaded] = useState(false);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -309,6 +318,117 @@ export default function Home() {
       setTimeout(() => setCopied(false), 1500);
     } catch {}
   };
+
+  // ===== 定时任务 =====
+  // 与 sendMessage 保持一致地构造当前领域/平台/释义快照，供服务端定时抓取复用
+  const buildScheduleSnapshot = () => {
+    const allSelected =
+      selectedDomains.length > 0 &&
+      selectedDomains.length === domainOptions.length;
+    const domain =
+      allSelected || selectedDomains.length === 0
+        ? ""
+        : selectedDomains.join("、");
+    const glossary: Record<string, string> = {};
+    for (const d of selectedDomains) {
+      const note = domainNotes[d];
+      if (note && note.trim()) glossary[d] = note.trim();
+    }
+    return {
+      domain,
+      platforms: selectedPlatforms,
+      glossary,
+      allDomains: domainOptions,
+    };
+  };
+
+  const openSchedule = async () => {
+    setSettingsOpen(false);
+    setSchedMsg(null);
+    setShowSchedule(true);
+    if (!syncCode) return; // 未启用同步时，弹窗内提示先启用
+    setSchedLoaded(false);
+    try {
+      const res = await fetch(`/api/schedule?code=${encodeURIComponent(syncCode)}`);
+      const data = await res.json();
+      if (res.ok && data.config) {
+        setSchedEnabled(data.config.enabled !== false);
+        setSchedEveryDays(data.config.everyDays || 1);
+        setSchedTimes(
+          Array.isArray(data.config.times) && data.config.times.length
+            ? data.config.times
+            : ["09:00"]
+        );
+      }
+    } catch {}
+    setSchedLoaded(true);
+  };
+
+  const saveSchedule = async () => {
+    if (!syncCode) return;
+    const times = Array.from(new Set(schedTimes.filter((t) => /^\d{1,2}:\d{2}$/.test(t)))).slice(0, 3);
+    if (times.length === 0) {
+      setSchedMsg({ ok: false, text: "至少配置一个触发时间" });
+      return;
+    }
+    setSchedBusy(true);
+    setSchedMsg(null);
+    try {
+      const res = await fetch("/api/schedule", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: syncCode,
+          enabled: schedEnabled,
+          everyDays: schedEveryDays,
+          times,
+          snapshot: buildScheduleSnapshot(),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSchedMsg({
+          ok: true,
+          text: schedEnabled
+            ? `已保存：每 ${schedEveryDays} 天于 ${times.join("、")} 自动抓取今日热点`
+            : "已保存（定时任务已停用）",
+        });
+      } else {
+        setSchedMsg({ ok: false, text: data.error || "保存失败" });
+      }
+    } catch (e: any) {
+      setSchedMsg({ ok: false, text: `保存失败：${e.message}` });
+    } finally {
+      setSchedBusy(false);
+    }
+  };
+
+  const deleteScheduleCfg = async () => {
+    if (!syncCode) return;
+    setSchedBusy(true);
+    setSchedMsg(null);
+    try {
+      const res = await fetch("/api/schedule", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: syncCode }),
+      });
+      if (res.ok) {
+        setSchedEnabled(true);
+        setSchedEveryDays(1);
+        setSchedTimes(["09:00"]);
+        setSchedMsg({ ok: true, text: "已删除定时任务" });
+      } else {
+        const data = await res.json();
+        setSchedMsg({ ok: false, text: data.error || "删除失败" });
+      }
+    } catch (e: any) {
+      setSchedMsg({ ok: false, text: `删除失败：${e.message}` });
+    } finally {
+      setSchedBusy(false);
+    }
+  };
+
 
   // 首次加载后，若已绑定同步码则自动拉一次云端最新数据
   useEffect(() => {
@@ -1251,6 +1371,146 @@ export default function Home() {
         </div>
       )}
 
+      {/* 定时任务配置弹窗 */}
+      {showSchedule && (
+        <div className="fixed inset-0 z-[55] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setShowSchedule(false)}
+          />
+          <div className="relative z-10 w-full max-w-md bg-white rounded-2xl shadow-xl p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-gray-800">⏰ 定时任务</span>
+              <button
+                onClick={() => setShowSchedule(false)}
+                className="text-gray-400 hover:text-gray-600 text-lg leading-none"
+              >
+                ✕
+              </button>
+            </div>
+
+            {!syncCode ? (
+              <div className="space-y-3">
+                <p className="text-xs text-gray-500 leading-relaxed">
+                  定时任务在服务端运行（关掉浏览器也会执行），需先启用「同步」以生成身份标识。
+                </p>
+                <button
+                  onClick={() => {
+                    setShowSchedule(false);
+                    setSyncMsg(null);
+                    setShowSync(true);
+                  }}
+                  className="w-full text-sm px-3 py-2 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition"
+                >
+                  去启用同步
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <p className="text-xs text-gray-500 leading-relaxed">
+                  按设定频率在服务端自动抓取「今日热点」（沿用你当前锁定的领域 / 平台 / 释义），结果追加到专属会话「⏰ 定时任务」。
+                </p>
+
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={schedEnabled}
+                    onChange={(e) => setSchedEnabled(e.target.checked)}
+                    className="w-4 h-4"
+                  />
+                  启用定时任务
+                </label>
+
+                <div className="flex items-center gap-2 text-sm text-gray-700">
+                  <span>频率：每</span>
+                  <select
+                    value={schedEveryDays}
+                    onChange={(e) => setSchedEveryDays(Number(e.target.value))}
+                    className="border rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                  >
+                    {Array.from({ length: 30 }, (_, i) => i + 1).map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                  <span>天</span>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-sm text-gray-700">
+                    触发时间（最多 3 个 · 北京时间）
+                  </div>
+                  {schedTimes.map((t, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input
+                        type="time"
+                        value={t}
+                        onChange={(e) => {
+                          const next = [...schedTimes];
+                          next[i] = e.target.value;
+                          setSchedTimes(next);
+                        }}
+                        className="border rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                      />
+                      {schedTimes.length > 1 && (
+                        <button
+                          onClick={() =>
+                            setSchedTimes(schedTimes.filter((_, j) => j !== i))
+                          }
+                          className="text-gray-400 hover:text-red-500 text-sm px-2"
+                        >
+                          删除
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  {schedTimes.length < 3 && (
+                    <button
+                      onClick={() => setSchedTimes([...schedTimes, "12:00"])}
+                      className="text-xs text-indigo-500 hover:text-indigo-600"
+                    >
+                      + 添加时间
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    onClick={saveSchedule}
+                    disabled={schedBusy}
+                    className="text-sm px-3 py-1.5 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition"
+                  >
+                    {schedBusy ? "处理中…" : "保存"}
+                  </button>
+                  <button
+                    onClick={deleteScheduleCfg}
+                    disabled={schedBusy}
+                    className="text-sm px-3 py-1.5 rounded-lg border text-gray-400 hover:text-red-500 hover:border-red-300 disabled:opacity-50 transition ml-auto"
+                  >
+                    删除任务
+                  </button>
+                </div>
+
+                {schedMsg && (
+                  <div
+                    className={`text-xs ${
+                      schedMsg.ok ? "text-emerald-600" : "text-red-500"
+                    }`}
+                  >
+                    {schedMsg.text}
+                  </div>
+                )}
+
+                <p className="text-[11px] text-gray-400 leading-relaxed border-t pt-3">
+                  ⚠️ 定时抓取由服务端常驻进程驱动（部署在 VPS 上生效）；抓取结果需在其他设备用同步码拉取查看。
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 会话侧边栏 */}
       {sidebarOpen && (
         <div className="fixed inset-0 z-40 flex">
@@ -1422,20 +1682,45 @@ export default function Home() {
                 </div>
               </>
             )}
-            <button
-              onClick={() => {
-                setSyncMsg(null);
-                setShowSync(true);
-              }}
-              className={`text-xs border rounded-lg px-2 py-1 transition ${
-                syncCode
-                  ? "text-emerald-600 border-emerald-200 hover:bg-emerald-50"
-                  : "text-gray-500 border-gray-200 hover:text-indigo-600 hover:border-indigo-300"
-              }`}
-              title={syncCode ? "同步已启用，点击管理" : "跨设备同步"}
-            >
-              🔄 {syncCode ? "已同步" : "同步"}
-            </button>
+            <div className="relative">
+              <button
+                onClick={() => setSettingsOpen((v) => !v)}
+                className={`text-xs border rounded-lg px-2 py-1 transition ${
+                  syncCode
+                    ? "text-emerald-600 border-emerald-200 hover:bg-emerald-50"
+                    : "text-gray-500 border-gray-200 hover:text-indigo-600 hover:border-indigo-300"
+                }`}
+                title="设置（同步 / 定时任务）"
+              >
+                ⚙️ 设置
+              </button>
+              {settingsOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setSettingsOpen(false)}
+                  />
+                  <div className="absolute right-0 top-full mt-1 z-50 w-36 bg-white border rounded-xl shadow-lg py-1 text-sm">
+                    <button
+                      onClick={() => {
+                        setSettingsOpen(false);
+                        setSyncMsg(null);
+                        setShowSync(true);
+                      }}
+                      className="w-full text-left px-3 py-2 hover:bg-gray-50 text-gray-700"
+                    >
+                      🔄 同步{syncCode ? "（已启用）" : ""}
+                    </button>
+                    <button
+                      onClick={openSchedule}
+                      className="w-full text-left px-3 py-2 hover:bg-gray-50 text-gray-700"
+                    >
+                      ⏰ 定时任务
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </div>
       </header>
