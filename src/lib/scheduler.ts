@@ -16,7 +16,8 @@ export interface ScheduleConfig {
   enabled: boolean;
   everyDays: number; // 每 X 天，1~30
   times: string[]; // HH:MM，最多 3 个
-  anchor: string; // 起算日 YYYY-MM-DD（CST）
+  anchor: string; // 起算日 = 开始日期 YYYY-MM-DD（CST），也是「每 X 天」的对齐基准
+  endDate: string; // 结束日期 YYYY-MM-DD（CST）；空串=不设结束，一直执行
   snapshot: ScheduleSnapshot;
   fired: string[]; // 已触发的槽位键 `${dateStr}T${HH:MM}`，仅保留最近若干条
   updatedAt: number;
@@ -100,6 +101,18 @@ export function normalizeConfig(
     )
   ).slice(0, 3) as string[];
   if (times.length === 0) return { error: "至少配置一个触发时间" };
+  const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+  // 开始日期：合法则采用，否则默认今天（CST）
+  const startDate =
+    typeof input?.startDate === "string" && dateRe.test(input.startDate.trim())
+      ? input.startDate.trim()
+      : todayCst;
+  // 结束日期：选填，空串=一直执行
+  const endRaw = typeof input?.endDate === "string" ? input.endDate.trim() : "";
+  const endDate = dateRe.test(endRaw) ? endRaw : "";
+  if (endDate && endDate < startDate) {
+    return { error: "结束日期不能早于开始日期" };
+  }
   const s = input?.snapshot || {};
   const snapshot: ScheduleSnapshot = {
     domain: typeof s.domain === "string" ? s.domain : "",
@@ -111,7 +124,8 @@ export function normalizeConfig(
     enabled: input?.enabled !== false,
     everyDays,
     times,
-    anchor: todayCst,
+    anchor: startDate,
+    endDate,
     snapshot,
     fired: [],
     updatedAt: Date.now(),
@@ -233,7 +247,10 @@ export async function runDueSchedules(nowMs: number = Date.now()): Promise<void>
     }
     if (!cfg.enabled) continue;
 
-    // 是否为「每 X 天」的当天
+    // 超过结束日期（若设置了）→ 跳过
+    if (cfg.endDate && dateStr > cfg.endDate) continue;
+
+    // 是否为「每 X 天」的当天（diff<0 表示还没到开始日期）
     const diff = daysBetween(cfg.anchor, dateStr);
     if (diff < 0 || diff % cfg.everyDays !== 0) continue;
 

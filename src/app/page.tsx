@@ -124,6 +124,14 @@ export default function Home() {
   const [schedEnabled, setSchedEnabled] = useState(true);
   const [schedEveryDays, setSchedEveryDays] = useState(1);
   const [schedTimes, setSchedTimes] = useState<string[]>(["09:00"]);
+  // 开始日期默认当天，结束日期选填（空=一直执行）
+  const [schedStartDate, setSchedStartDate] = useState("");
+  const [schedEndDate, setSchedEndDate] = useState("");
+  // 定时任务专属的领域 / 平台选择（与主页面互不影响；打开时默认填充主页面当前选择）
+  const [schedDomains, setSchedDomains] = useState<string[]>([]);
+  const [schedPlatforms, setSchedPlatforms] = useState<string[]>([]);
+  // 定时任务里领域选满 MAX_DOMAINS 后再点触发的「替换哪个」弹窗
+  const [schedReplaceCandidate, setSchedReplaceCandidate] = useState<string | null>(null);
   const [schedBusy, setSchedBusy] = useState(false);
   const [schedMsg, setSchedMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [schedLoaded, setSchedLoaded] = useState(false);
@@ -383,18 +391,51 @@ export default function Home() {
   };
 
   // ===== 定时任务 =====
-  // 与 sendMessage 保持一致地构造当前领域/平台/释义快照，供服务端定时抓取复用
+  // 本地今天（YYYY-MM-DD），用于开始日期默认填充
+  const todayStr = () => {
+    const d = new Date();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${d.getFullYear()}-${mm}-${dd}`;
+  };
+
+  // 定时任务里的领域选择：逻辑与主页面 toggleDomain 完全一致（上限 MAX_DOMAINS，选满再点弹替换）
+  const toggleSchedDomain = (d: string) => {
+    if (schedDomains.includes(d)) {
+      setSchedDomains((prev) => prev.filter((x) => x !== d));
+      return;
+    }
+    if (schedDomains.length >= MAX_DOMAINS) {
+      setSchedReplaceCandidate(d);
+      return;
+    }
+    setSchedDomains((prev) => [...prev, d]);
+  };
+  const confirmSchedReplaceDomain = (victim: string) => {
+    if (!schedReplaceCandidate) return;
+    setSchedDomains((prev) =>
+      prev.map((x) => (x === victim ? schedReplaceCandidate : x))
+    );
+    setSchedReplaceCandidate(null);
+  };
+  const toggleSchedPlatform = (p: string) => {
+    setSchedPlatforms((prev) =>
+      prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
+    );
+  };
+
+  // 与 sendMessage 保持一致地构造领域/平台/释义快照，供服务端定时抓取复用
   const buildScheduleSnapshot = () => {
-    // 与 sendMessage 一致：空选=不锁定领域(呈现全部热点)，选了才逐个过滤
-    const domain = selectedDomains.length === 0 ? "" : selectedDomains.join("、");
+    // 与主页面一致：空选=不锁定领域(呈现全部热点)，选了才逐个过滤
+    const domain = schedDomains.length === 0 ? "" : schedDomains.join("、");
     const glossary: Record<string, string> = {};
-    for (const d of selectedDomains) {
+    for (const d of schedDomains) {
       const note = domainNotes[d];
       if (note && note.trim()) glossary[d] = note.trim();
     }
     return {
       domain,
-      platforms: selectedPlatforms,
+      platforms: schedPlatforms,
       glossary,
       allDomains: domainOptions,
     };
@@ -403,19 +444,36 @@ export default function Home() {
   const openSchedule = async () => {
     setSettingsOpen(false);
     setSchedMsg(null);
+    setSchedReplaceCandidate(null);
     setShowSchedule(true);
+    // 默认填充：开始日期=今天、结束日期=空、领域/平台=主页面当前选择
+    setSchedStartDate(todayStr());
+    setSchedEndDate("");
+    setSchedDomains([...selectedDomains].slice(0, MAX_DOMAINS));
+    setSchedPlatforms([...selectedPlatforms]);
     if (!scheduleCode) return;
     setSchedLoaded(false);
     try {
       const res = await fetch(`/api/schedule?code=${encodeURIComponent(scheduleCode)}`);
       const data = await res.json();
       if (res.ok && data.config) {
-        setSchedEnabled(data.config.enabled !== false);
-        setSchedEveryDays(data.config.everyDays || 1);
+        const cfg = data.config;
+        setSchedEnabled(cfg.enabled !== false);
+        setSchedEveryDays(cfg.everyDays || 1);
         setSchedTimes(
-          Array.isArray(data.config.times) && data.config.times.length
-            ? data.config.times
-            : ["09:00"]
+          Array.isArray(cfg.times) && cfg.times.length ? cfg.times : ["09:00"]
+        );
+        // 已有配置：回显开始/结束日期与领域/平台
+        setSchedStartDate(cfg.anchor || todayStr());
+        setSchedEndDate(cfg.endDate || "");
+        const snap = cfg.snapshot || {};
+        setSchedDomains(
+          typeof snap.domain === "string" && snap.domain
+            ? snap.domain.split("、").filter(Boolean).slice(0, MAX_DOMAINS)
+            : []
+        );
+        setSchedPlatforms(
+          Array.isArray(snap.platforms) ? snap.platforms : [...selectedPlatforms]
         );
       }
     } catch {}
@@ -429,6 +487,18 @@ export default function Home() {
       setSchedMsg({ ok: false, text: "至少配置一个触发时间" });
       return;
     }
+    const startDate = /^\d{4}-\d{2}-\d{2}$/.test(schedStartDate)
+      ? schedStartDate
+      : todayStr();
+    const endDate = /^\d{4}-\d{2}-\d{2}$/.test(schedEndDate) ? schedEndDate : "";
+    if (endDate && endDate < startDate) {
+      setSchedMsg({ ok: false, text: "结束日期不能早于开始日期" });
+      return;
+    }
+    if (schedPlatforms.length === 0) {
+      setSchedMsg({ ok: false, text: "至少选择一个抓取平台" });
+      return;
+    }
     setSchedBusy(true);
     setSchedMsg(null);
     try {
@@ -440,15 +510,20 @@ export default function Home() {
           enabled: schedEnabled,
           everyDays: schedEveryDays,
           times,
+          startDate,
+          endDate,
           snapshot: buildScheduleSnapshot(),
         }),
       });
       const data = await res.json();
       if (res.ok) {
+        const rangeText = endDate
+          ? `${startDate} 起至 ${endDate}`
+          : `${startDate} 起长期执行`;
         setSchedMsg({
           ok: true,
           text: schedEnabled
-            ? `已保存：每 ${schedEveryDays} 天于 ${times.join("、")} 自动抓取今日热点，结果会自动回到本设备`
+            ? `已保存：${rangeText}，每 ${schedEveryDays} 天于 ${times.join("、")} 自动抓取热点，结果会自动回到本设备`
             : "已保存（定时任务已停用）",
         });
       } else {
@@ -475,6 +550,10 @@ export default function Home() {
         setSchedEnabled(true);
         setSchedEveryDays(1);
         setSchedTimes(["09:00"]);
+        setSchedStartDate(todayStr());
+        setSchedEndDate("");
+        setSchedDomains([...selectedDomains].slice(0, MAX_DOMAINS));
+        setSchedPlatforms([...selectedPlatforms]);
         setSchedMsg({ ok: true, text: "已删除定时任务" });
       } else {
         const data = await res.json();
@@ -1291,6 +1370,41 @@ export default function Home() {
         </div>
       )}
 
+      {schedReplaceCandidate && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setSchedReplaceCandidate(null)}
+          />
+          <div className="relative z-10 w-full max-w-sm bg-white rounded-2xl shadow-xl p-5 space-y-4">
+            <div className="font-bold text-gray-800">最多选 {MAX_DOMAINS} 个领域</div>
+            <p className="text-sm text-gray-500">
+              已选满 {MAX_DOMAINS} 个。要把
+              <span className="mx-1 font-medium text-emerald-600">{schedReplaceCandidate}</span>
+              替换掉下面哪一个？
+            </p>
+            <div className="flex flex-col gap-2">
+              {schedDomains.map((d) => (
+                <button
+                  key={d}
+                  onClick={() => confirmSchedReplaceDomain(d)}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 hover:border-emerald-400 hover:bg-emerald-50 transition text-left"
+                >
+                  替换「{d}」
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setSchedReplaceCandidate(null)}
+              className="w-full px-3 py-2 rounded-lg text-sm text-gray-400 hover:text-gray-600 transition"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+
       {showDomainInput && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <div
@@ -1583,7 +1697,7 @@ export default function Home() {
             {(
               <div className="space-y-4">
                 <p className="text-xs text-gray-500 leading-relaxed">
-                  按设定频率在服务端自动抓取「今日热点」（沿用你当前锁定的领域 / 平台 / 释义），关掉浏览器也会执行，抓完自动回到本设备的「⏰ 定时任务」会话。
+                  按设定频率在服务端自动抓取热点（沿用下方选定的领域 / 平台 / 释义），关掉浏览器也会执行，抓完自动回到本设备的「⏰ 定时任务」会话。
                 </p>
 
                 <label className="flex items-center gap-2 text-sm text-gray-700">
@@ -1595,6 +1709,39 @@ export default function Home() {
                   />
                   启用定时任务
                 </label>
+
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-gray-700">
+                  <div className="flex items-center gap-2">
+                    <span>开始日期</span>
+                    <input
+                      type="date"
+                      value={schedStartDate}
+                      onChange={(e) => setSchedStartDate(e.target.value)}
+                      className="border rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span>结束日期</span>
+                    <input
+                      type="date"
+                      value={schedEndDate}
+                      min={schedStartDate || undefined}
+                      onChange={(e) => setSchedEndDate(e.target.value)}
+                      className="border rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                    />
+                    {schedEndDate && (
+                      <button
+                        onClick={() => setSchedEndDate("")}
+                        className="text-xs text-gray-400 hover:text-gray-600"
+                      >
+                        清除
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <p className="text-[11px] text-gray-400 -mt-2">
+                  结束日期留空 = 从开始日期起一直执行，不会自动停。
+                </p>
 
                 <div className="flex items-center gap-2 text-sm text-gray-700">
                   <span>频率：每</span>
@@ -1649,6 +1796,69 @@ export default function Home() {
                     </button>
                   )}
                 </div>
+
+                {/* 关注领域：逻辑与主页面一致（不选=全部热点，最多 3 个） */}
+                <div className="space-y-1.5">
+                  <div className="text-sm text-gray-700">
+                    关注领域
+                    <span className="text-gray-300">
+                      （不选 = 抓取全部热点，最多选 {MAX_DOMAINS} 个）
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {domainOptions.map((d) => {
+                      const on = schedDomains.includes(d);
+                      return (
+                        <button
+                          key={d}
+                          onClick={() => toggleSchedDomain(d)}
+                          className={`text-xs px-2.5 py-1 rounded-full border transition ${
+                            on
+                              ? "bg-indigo-500 text-white border-indigo-500"
+                              : "bg-white text-gray-600 border-gray-200 hover:border-indigo-300"
+                          }`}
+                        >
+                          {d}
+                        </button>
+                      );
+                    })}
+                    {schedDomains.length > 0 && (
+                      <button
+                        onClick={() => setSchedDomains([])}
+                        className="text-xs px-2 py-1 text-gray-400 hover:text-gray-600"
+                      >
+                        清空
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* 平台选择 */}
+                <div className="space-y-1.5">
+                  <div className="text-sm text-gray-700">
+                    抓取平台
+                    <span className="text-gray-300">（至少选 1 个）</span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {PLATFORMS.map((p) => {
+                      const on = schedPlatforms.includes(p);
+                      return (
+                        <button
+                          key={p}
+                          onClick={() => toggleSchedPlatform(p)}
+                          className={`text-xs px-2.5 py-1 rounded-full border transition ${
+                            on
+                              ? "bg-emerald-500 text-white border-emerald-500"
+                              : "bg-white text-gray-600 border-gray-200 hover:border-emerald-300"
+                          }`}
+                        >
+                          {p}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
 
                 <div className="flex flex-wrap gap-2 pt-1">
                   <button
