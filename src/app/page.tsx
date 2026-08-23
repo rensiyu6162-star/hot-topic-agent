@@ -1718,7 +1718,7 @@ export default function Home() {
                     checked={schedEnabled}
                     disabled={!schedEditMode}
                     onChange={(e) => setSchedEnabled(e.target.checked)}
-                    className="w-4 h-4 disabled:opacity-70"
+                    className="w-4 h-4 disabled:opacity-90"
                   />
                   启用
                 </label>
