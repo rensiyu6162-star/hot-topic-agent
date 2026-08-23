@@ -358,6 +358,14 @@ const TOOLS = [
 ];
 // ========== System Prompt ==========
 
+// 含义不明确/小众/缩写型领域词的精确释义，避免模型自行臆测宽泛含义而滥打标签
+const DOMAIN_GLOSSARY: { test: RegExp; note: string }[] = [
+  {
+    test: /反\s*bl|反耽美|反\s*boys?['']?\s*love/i,
+    note: "特指反对/批评「男男同性恋爱（BL / 耽美 / Boys' Love）」题材的内容，比如反对耽改剧、BL 小说、BL 同人、腐文化等。判定要极窄：只有当热点的核心话题就是在讨论 BL / 耽美这类题材本身（或明确反对这类题材）时才打这个标签。女性成长、女性权益、职场、婚恋、诈骗、社会新闻等，只要不是在直接讲 BL / 耽美题材，就【绝对不要】打【反bl】。更不要把「反bl」臆测成'反被规训 / 反凝视 / 反刻板印象'之类的宽泛含义去硬套到大量热点上。",
+  },
+];
+
 function buildSystemPrompt(domain: string, platforms: string[]) {
   const domainHint = domain
     ? `用户的创作领域是「${domain}」。`
@@ -371,6 +379,17 @@ function buildSystemPrompt(domain: string, platforms: string[]) {
   const rightExample = domainList.map((d) => `【${d}】`).join("");
   const wrongExample = `【${domainList.join("、")}】`;
 
+  // 针对含义不明确的领域词注入精确释义，避免模型臆测滥打标签
+  const glossaryLines = domainList
+    .map((d) => {
+      const hit = DOMAIN_GLOSSARY.find((g) => g.test.test(d));
+      return hit ? `- 「${d}」的准确含义：${hit.note}` : "";
+    })
+    .filter(Boolean);
+  const glossaryBlock = glossaryLines.length
+    ? `\n- ⚠️ 领域含义说明（务必按这个含义判断，不要自行臆测）：\n${glossaryLines.join("\n")}`
+    : "";
+
   // 展示规范：是否锁定了领域，走两套完全不同的输出逻辑
   const displayRule = domain
     ? `展示热点的输出规范（用户已锁定领域「${domain}」，务必严格执行）：
@@ -382,7 +401,7 @@ function buildSystemPrompt(domain: string, platforms: string[]) {
 - ⚠️ 对含义不明确、小众或用缩写表示的领域词（例如「反bl」），只有当热点的核心内容明确、直接就是在讲这个主题时才打该标签；只要有一点不确定，就【不要】打这个标签，也不要用你自己臆测的宽泛含义（如把它当成"反被规训/反凝视"之类）去硬套到大量热点上。
 - 按相关度从高到低排序，最相关的在最前并在标题前加 ⭐。
 - 如果某平台筛选后没有任何属于「${domain}」的热点，就直接写"该平台今日暂无与「${domain}」相关的热点"，不要用无关内容填充。
-- 格式示例：1. ⭐ 某条只关乎${domainList[0] || "该领域"}的热点 【${domainList[0] || "该领域"}】`
+- 格式示例：1. ⭐ 某条只关乎${domainList[0] || "该领域"}的热点 【${domainList[0] || "该领域"}】${glossaryBlock}`
     : `展示热点的输出规范（用户未锁定领域，全部展示并归类）：
 - 列出各平台抓到的全部热点，按平台热度原顺序展示，不做筛选和重排。
 - 每一条热点后面都要用【】标注它所属的创作领域标签，可以多标（一条热点可同时属于多个领域）；每个领域用独立的【】，不要塞进同一个【】。
