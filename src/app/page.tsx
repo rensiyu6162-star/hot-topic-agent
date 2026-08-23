@@ -7,6 +7,7 @@ interface Message {
   content: string;
   toolLogs?: string[];
   emptyNote?: string;
+  domains?: string[]; // 该条用户消息发送时锁定的领域（用于在气泡上直观显示本轮生效领域）
 }
 
 interface DetailData {
@@ -187,17 +188,26 @@ export default function Home() {
     setHydrated(true);
   }, []);
 
-  // 领域设置与会话变化时持久化（恢复完成后才写，避免用默认值覆盖）
+  // 领域设置变化时持久化（轻量：只序列化领域相关数据，不碰 sessions）
+  // 拆分出来是为了让“领域切换”这类高频操作不再同步序列化整个会话历史，
+  // 否则每点一个领域芯片都会 JSON.stringify(sessions) 卡住主线程 → 切换迟钝。
   useEffect(() => {
     if (!hydrated) return;
     try {
       localStorage.setItem("domainOptions", JSON.stringify(domainOptions));
       localStorage.setItem("selectedDomains", JSON.stringify(selectedDomains));
       localStorage.setItem("domainNotes", JSON.stringify(domainNotes));
+    } catch {}
+  }, [hydrated, domainOptions, selectedDomains, domainNotes]);
+
+  // 会话变化时才持久化 sessions（重数据单独一个 effect）
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
       localStorage.setItem("sessions", JSON.stringify(sessions));
       localStorage.setItem("activeSessionId", activeId);
     } catch {}
-  }, [hydrated, domainOptions, selectedDomains, domainNotes, sessions, activeId]);
+  }, [hydrated, sessions, activeId]);
 
   // ===== 跨设备同步 =====
   const buildPayload = () => ({
@@ -590,7 +600,21 @@ export default function Home() {
     const msg = text || input.trim();
     if (!msg || loading) return;
     setInput("");
-    const userMsg: Message = { role: "user", content: msg };
+
+    // 本轮生效的领域：全选或空选视为“全部领域”，否则记录锁定的领域集合。
+    // 在此处快照，既随请求发给后端，又盖章到用户消息上，让“切换领域”当轮可见。
+    const allSelected =
+      selectedDomains.length > 0 &&
+      selectedDomains.length === domainOptions.length;
+    const lockedDomains =
+      allSelected || selectedDomains.length === 0 ? [] : [...selectedDomains];
+    const domainStr = lockedDomains.join("、");
+
+    const userMsg: Message = {
+      role: "user",
+      content: msg,
+      domains: lockedDomains.length > 0 ? lockedDomains : undefined,
+    };
     setSessions((prev) =>
       prev.map((s) => {
         if (s.id !== activeId) return s;
@@ -603,15 +627,6 @@ export default function Home() {
       })
     );
     setLoading(true);
-
-    // 全选默认视为“全部领域”，不做重排；否则把选中的领域传给后端
-    const allSelected =
-      selectedDomains.length > 0 &&
-      selectedDomains.length === domainOptions.length;
-    const domainStr =
-      allSelected || selectedDomains.length === 0
-        ? ""
-        : selectedDomains.join("、");
 
     // 把用户为(已选)自创领域填写的释义一并传给后端，用于精确判定
     const glossary: Record<string, string> = {};
@@ -657,10 +672,10 @@ export default function Home() {
 
   const renderDomainChips = (autoFocusInput = false) => {
     void autoFocusInput;
-    const ordered = [
-      ...domainOptions.filter((d) => selectedDomains.includes(d)),
-      ...domainOptions.filter((d) => !selectedDomains.includes(d)),
-    ];
+    // 保持 domainOptions 原始顺序，不做“选中优先”重排——
+    // 否则每次点选，被点的芯片都会跳到最前面，造成视觉抖动 + 误点，
+    // 让人觉得“切换迟钝、点不准”。
+    const ordered = domainOptions;
     return (
       <div className="flex flex-wrap gap-2 items-center">
         {ordered.map((d) => {
@@ -1769,6 +1784,19 @@ export default function Home() {
                     isUser ? "items-end" : "items-start"
                   }`}
                 >
+                  {/* 用户消息上方标注本轮锁定的领域，切换领域后当轮回答即可直观区分 */}
+                  {isUser && msg.domains && msg.domains.length > 0 && (
+                    <div className="mb-1 flex flex-wrap justify-end gap-1">
+                      {msg.domains.map((d) => (
+                        <span
+                          key={d}
+                          className="rounded-full bg-indigo-50 text-indigo-600 text-[10px] px-2 py-0.5 border border-indigo-200"
+                        >
+                          {d}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <div
                     onClick={
                       selectMode && !isWelcome ? () => toggleSelect(i) : undefined
