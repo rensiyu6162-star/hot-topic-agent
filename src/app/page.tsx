@@ -579,6 +579,12 @@ export default function Home() {
     </div>
   );
 
+  // 去掉多余的 Markdown 符号（行首 #/##/### 标题符号、** 加粗、* 强调）后再展示
+  const cleanMarkdown = (text: string) =>
+    text
+      .replace(/^\s*#{1,6}\s+/gm, "")
+      .replace(/\*+/g, "");
+
   // 把一行文字里的 【xxx】 渲染成跑道圆形胶囊
   const renderLineWithTags = (text: string, keyPrefix: string) => {
     const parts = text.split(/(【[^】]*】)/g);
@@ -654,7 +660,7 @@ export default function Home() {
       if (!isItem) {
         return (
           <div key={li} className="whitespace-pre-wrap">
-            {renderLineWithTags(line, `${msgIndex}-${li}`)}
+            {renderLineWithTags(cleanMarkdown(line), `${msgIndex}-${li}`)}
           </div>
         );
       }
@@ -665,7 +671,7 @@ export default function Home() {
       return (
         <div key={li} className="group">
           <div className="whitespace-pre-wrap">
-            {renderLineWithTags(line, key)}
+            {renderLineWithTags(cleanMarkdown(line), key)}
             <button
               onClick={() => toggleDetail(key, topic, platform)}
               className="align-middle ml-2 whitespace-nowrap text-[11px] leading-none px-2 py-1 rounded-full border border-indigo-300 text-indigo-500 hover:bg-indigo-50 transition opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
@@ -684,7 +690,7 @@ export default function Home() {
                       📄 详细报道
                     </div>
                     <div className="whitespace-pre-wrap leading-relaxed">
-                      {st.data.report}
+                      {cleanMarkdown(st.data.report)}
                     </div>
                   </div>
                   {st.data.sites?.length > 0 && (
