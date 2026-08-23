@@ -813,6 +813,28 @@ export async function POST(req: NextRequest) {
     };
 
     let conversationMessages = [systemMsg, ...messages];
+    // 领域可能刚被改名/增删，但对话历史里还留着旧领域的锁定声明、筛选结果和标签。
+    // 在最后一条用户消息前插入一条“当前领域”提醒（最高时效性），强制本次结果只依据最新领域集合，
+    // 避免模型沿用历史里的旧标签——即"改完标签，新跑的结果必须符合新标签"。
+    if (domain) {
+      const dl = domain
+        .split(/[、，,\/\s]+/)
+        .map((d: string) => d.trim())
+        .filter(Boolean);
+      const reminder = {
+        role: "system",
+        content: `【重要·以此为准】用户当前锁定的领域集合是：${dl
+          .map((d: string) => `「${d}」`)
+          .join(
+            "、"
+          )}，共 ${dl.length} 个。这份清单【覆盖并作废】对话历史里出现过的任何旧领域组合（用户随时可能改名/增删领域）。本次抓取、筛选、近30天兜底与打标签都【只能】依据这份最新清单逐个领域重新判断；历史消息里针对旧领域生成的“锁定领域/筛选结果/标签”一律【不得沿用】。若发现历史标签与当前清单不一致，以当前清单为准。`,
+      };
+      const lastUserIdx = conversationMessages
+        .map((m: any) => m.role)
+        .lastIndexOf("user");
+      if (lastUserIdx >= 0) conversationMessages.splice(lastUserIdx, 0, reminder);
+      else conversationMessages.push(reminder);
+    }
     const toolLogs: string[] = [];
     // 近30天兜底：小众领域今日无热点时，search_recent_topics_by_domain 的结果收集到这里，
     // 随响应一起返回给前端，用「气泡框」提示用户。
