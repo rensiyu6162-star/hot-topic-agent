@@ -596,14 +596,20 @@ export default function Home() {
     return parts.map((part, idx) => {
       const m = part.match(/^【([^】]*)】$/);
       if (m) {
-        return (
+        // 兜底：模型有时把多个领域塞进同一个【】（如「女性成长、反bl」），
+        // 这里按顿号/逗号/斜杠拆开，一个领域渲染成一个独立胶囊。
+        const tags = m[1]
+          .split(/[、，,\/]+/)
+          .map((t) => t.trim())
+          .filter(Boolean);
+        return tags.map((tag, j) => (
           <span
-            key={`${keyPrefix}-${idx}`}
+            key={`${keyPrefix}-${idx}-${j}`}
             className="inline-flex items-center rounded-full bg-emerald-50 text-emerald-600 text-[10px] leading-none px-1.5 py-0.5 mx-0.5 align-middle"
           >
-            {m[1]}
+            {tag}
           </span>
-        );
+        ));
       }
       return <span key={`${keyPrefix}-${idx}`}>{part}</span>;
     });
