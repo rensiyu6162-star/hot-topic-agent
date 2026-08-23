@@ -18,6 +18,7 @@ interface DetailState {
   open: boolean;
   loading: boolean;
   data: DetailData | null;
+  error?: boolean;
 }
 
 interface Session {
@@ -701,7 +702,7 @@ export default function Home() {
     return m ? m[1].trim() : "";
   };
 
-  // 点击「查看详情」：首次拉取详情并展开，之后仅切换展开/收起
+  // 点击「查看详情」：首次拉取详情并展开，之后仅切换展开/收起（失败态也可正常展开收起，重试走独立按钮）
   const toggleDetail = async (key: string, topic: string, platform = "") => {
     const cur = details[key];
     if (cur && cur.data) {
@@ -709,6 +710,11 @@ export default function Home() {
       return;
     }
     if (cur && cur.loading) return;
+    await loadDetail(key, topic, platform);
+  };
+
+  // 实际拉取详情（首次点击与「重试」共用）：失败时置 error 标记，供 UI 显示重试按钮
+  const loadDetail = async (key: string, topic: string, platform = "") => {
     setDetails((p) => ({
       ...p,
       [key]: { open: true, loading: true, data: null },
@@ -720,7 +726,13 @@ export default function Home() {
         body: JSON.stringify({ topic, platform }),
       });
       const data = (await res.json()) as DetailData;
-      setDetails((p) => ({ ...p, [key]: { open: true, loading: false, data } }));
+      // 服务端 500 或返回"详情获取失败…"这类兜底文案，同样按失败处理，展示重试按钮
+      const failed =
+        !res.ok || /^详情获取失败/.test((data?.report || "").trim());
+      setDetails((p) => ({
+        ...p,
+        [key]: { open: true, loading: false, data, error: failed },
+      }));
     } catch {
       setDetails((p) => ({
         ...p,
@@ -728,6 +740,7 @@ export default function Home() {
           open: true,
           loading: false,
           data: { report: "详情获取失败，请稍后重试。", sites: [], videos: [] },
+          error: true,
         },
       }));
     }
@@ -769,6 +782,18 @@ export default function Home() {
             <div className="mt-2 mb-2 rounded-xl bg-gray-50 border border-gray-200 p-3 text-xs text-gray-600 space-y-3">
               {st.loading ? (
                 <div className="text-gray-400">正在生成详情…</div>
+              ) : st.error ? (
+                <div className="flex items-center gap-3">
+                  <span className="text-gray-500">
+                    {cleanMarkdown(st.data?.report || "详情获取失败，请稍后重试。")}
+                  </span>
+                  <button
+                    onClick={() => loadDetail(key, topic, platform)}
+                    className="whitespace-nowrap text-[11px] leading-none px-2 py-1 rounded-full border border-indigo-300 text-indigo-500 hover:bg-indigo-50 transition"
+                  >
+                    ↻ 刷新重试
+                  </button>
+                </div>
               ) : st.data ? (
                 <>
                   <div>
