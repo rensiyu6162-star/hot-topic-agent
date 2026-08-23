@@ -95,6 +95,10 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   // 每条热点的「查看详情」展开状态（key = 消息序号:行号）
   const [details, setDetails] = useState<Record<string, DetailState>>({});
+  // 消息多选删除：长按(移动端)/悬浮工具栏删除按钮(桌面端) 唤起编辑态，勾选后统一删除
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedMsgs, setSelectedMsgs] = useState<number[]>([]);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectorsRef = useRef<HTMLDivElement>(null);
@@ -746,6 +750,66 @@ export default function Home() {
     }
   };
 
+  // ========== 消息多选删除 ==========
+  const isWelcomeMsg = (i: number) => messages[i]?.content === WELCOME.content;
+
+  // 触发删除的那条，连同配对的问/答一起自动选中：
+  // 点在「回答」上→带上上一条「提问」；点在「提问」上→带上下一条「回答」。欢迎语不参与。
+  const pairIndicesFor = (i: number): number[] => {
+    const msg = messages[i];
+    if (!msg) return [];
+    const res = [i];
+    if (msg.role === "assistant") {
+      if (i - 1 >= 0 && messages[i - 1].role === "user") res.push(i - 1);
+    } else if (i + 1 < messages.length && messages[i + 1].role === "assistant") {
+      res.push(i + 1);
+    }
+    return res.filter((idx) => !isWelcomeMsg(idx));
+  };
+
+  const enterSelectMode = (i: number) => {
+    setSelectMode(true);
+    setSelectedMsgs(pairIndicesFor(i));
+  };
+
+  const toggleSelect = (i: number) => {
+    if (isWelcomeMsg(i)) return;
+    setSelectedMsgs((prev) =>
+      prev.includes(i) ? prev.filter((x) => x !== i) : [...prev, i]
+    );
+  };
+
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelectedMsgs([]);
+  };
+
+  const deleteSelected = () => {
+    if (selectedMsgs.length === 0) return;
+    const del = new Set(selectedMsgs);
+    setActiveMessages((prev) => prev.filter((_, idx) => !del.has(idx)));
+    setDetails({}); // 删除后序号会平移，清空详情缓存避免 key 错位
+    exitSelectMode();
+  };
+
+  const copyMessage = async (content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {}
+  };
+
+  // 移动端长按唤起编辑态（500ms）；滑动/松手则取消计时
+  const startLongPress = (i: number) => {
+    if (isWelcomeMsg(i) || selectMode) return;
+    longPressTimer.current = setTimeout(() => enterSelectMode(i), 500);
+  };
+  const cancelLongPress = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
+
   // 渲染 AI 正文：逐行解析，热点条目支持 hover「查看详情」原地展开
   const renderAssistantContent = (content: string, msgIndex: number) => {
     const lines = content.split("\n");
@@ -1372,38 +1436,84 @@ export default function Home() {
               {renderPlatformChips()}
             </div>
           </div>
-          {messages.map((msg, i) => (
-            <div
-              key={i}
-              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-            >
-              <div
-                className={`rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
-                  msg.role === "user"
-                    ? "max-w-[85%] bg-indigo-500 text-white"
-                    : msg.content === WELCOME.content
-                    ? "max-w-[85%] bg-white text-gray-800 shadow-sm border"
-                    : "w-full bg-white text-gray-800 shadow-sm border"
-                }`}
-              >
-                {msg.toolLogs && msg.toolLogs.length > 0 && (
-                  <div className="mb-2 flex flex-wrap gap-1.5 border-b pb-2">
-                    {msg.toolLogs.map((log, j) => (
-                      <span
-                        key={j}
-                        className="inline-flex items-center gap-1 rounded-full bg-gray-100 text-gray-500 text-xs px-2.5 py-0.5 border border-gray-200"
-                      >
-                        🔧 {log}
-                      </span>
-                    ))}
+          {messages.map((msg, i) => {
+            const isWelcome = msg.content === WELCOME.content;
+            const isUser = msg.role === "user";
+            const checked = selectedMsgs.includes(i);
+            return (
+              <div key={i} className="flex items-start gap-2">
+                {selectMode &&
+                  (isWelcome ? (
+                    <div className="w-4 shrink-0" />
+                  ) : (
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleSelect(i)}
+                      className="mt-3 h-4 w-4 shrink-0 accent-indigo-500 cursor-pointer"
+                    />
+                  ))}
+                <div
+                  className={`group/msg flex flex-1 min-w-0 flex-col ${
+                    isUser ? "items-end" : "items-start"
+                  }`}
+                >
+                  <div
+                    onClick={
+                      selectMode && !isWelcome ? () => toggleSelect(i) : undefined
+                    }
+                    onTouchStart={() => startLongPress(i)}
+                    onTouchEnd={cancelLongPress}
+                    onTouchMove={cancelLongPress}
+                    className={`rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
+                      isUser
+                        ? "max-w-[85%] bg-indigo-500 text-white"
+                        : isWelcome
+                        ? "max-w-[85%] bg-white text-gray-800 shadow-sm border"
+                        : "w-full bg-white text-gray-800 shadow-sm border"
+                    } ${selectMode && !isWelcome ? "cursor-pointer select-none" : ""}`}
+                  >
+                    {msg.toolLogs && msg.toolLogs.length > 0 && (
+                      <div className="mb-2 flex flex-wrap gap-1.5 border-b pb-2">
+                        {msg.toolLogs.map((log, j) => (
+                          <span
+                            key={j}
+                            className="inline-flex items-center gap-1 rounded-full bg-gray-100 text-gray-500 text-xs px-2.5 py-0.5 border border-gray-200"
+                          >
+                            🔧 {log}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div className={selectMode ? "pointer-events-none" : ""}>
+                      {msg.role === "assistant" && !isWelcome
+                        ? renderAssistantContent(msg.content, i)
+                        : msg.content}
+                    </div>
                   </div>
-                )}
-                {msg.role === "assistant" && msg.content !== WELCOME.content
-                  ? renderAssistantContent(msg.content, i)
-                  : msg.content}
+                  {/* 桌面端：悬浮时在气泡下方显示工具栏（参考豆包）；点删除唤起编辑态 */}
+                  {!selectMode && !isWelcome && (
+                    <div className="mt-1 hidden sm:flex gap-1 opacity-0 group-hover/msg:opacity-100 transition">
+                      <button
+                        onClick={() => copyMessage(msg.content)}
+                        title="复制"
+                        className="text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded p-1 transition"
+                      >
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+                      </button>
+                      <button
+                        onClick={() => enterSelectMode(i)}
+                        title="删除"
+                        className="text-gray-400 hover:text-red-500 hover:bg-red-50 rounded p-1 transition"
+                      >
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" /></svg>
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {loading && (
             <div className="flex justify-end">
               <div className="bg-white rounded-2xl px-4 py-3 text-sm text-gray-400 shadow-sm border">
@@ -1416,6 +1526,7 @@ export default function Home() {
       </div>
 
       {/* Quick Actions：每次新对话/重新打开都常驻，方便一键发送常用指令 */}
+      {!selectMode && (
       <div className="px-4 pb-2">
         <div className="max-w-[57.6rem] mx-auto w-full flex flex-wrap gap-2">
           {[
@@ -1441,29 +1552,54 @@ export default function Home() {
           ))}
         </div>
       </div>
+      )}
 
-      {/* Input */}
+      {/* Input / 编辑态删除栏 */}
 
-      <div className="border-t bg-white px-4 py-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-        <div className="flex gap-2 max-w-[57.6rem] mx-auto">
-          <input
-            ref={inputRef}
-            className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-            placeholder="输入你的需求，例如：帮我看看今天有什么热点"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
-            disabled={loading}
-          />
-          <button
-            onClick={() => sendMessage()}
-            disabled={loading || !input.trim()}
-            className="bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
-          >
-            发送
-          </button>
+      {selectMode ? (
+        <div className="border-t bg-white px-4 py-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+          <div className="flex items-center gap-3 max-w-[57.6rem] mx-auto">
+            <span className="text-sm text-gray-500">
+              已选 {selectedMsgs.length} 条
+            </span>
+            <div className="flex-1" />
+            <button
+              onClick={exitSelectMode}
+              className="px-4 py-2 rounded-lg text-sm border text-gray-600 hover:bg-gray-50 transition"
+            >
+              取消
+            </button>
+            <button
+              onClick={deleteSelected}
+              disabled={selectedMsgs.length === 0}
+              className="bg-red-500 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
+            >
+              删除
+            </button>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="border-t bg-white px-4 py-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+          <div className="flex gap-2 max-w-[57.6rem] mx-auto">
+            <input
+              ref={inputRef}
+              className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+              placeholder="输入你的需求，例如：帮我看看今天有什么热点"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
+              disabled={loading}
+            />
+            <button
+              onClick={() => sendMessage()}
+              disabled={loading || !input.trim()}
+              className="bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
+            >
+              发送
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
