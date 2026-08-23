@@ -98,6 +98,7 @@ export default function Home() {
   // 消息多选删除：长按(移动端)/悬浮工具栏删除按钮(桌面端) 唤起编辑态，勾选后统一删除
   const [selectMode, setSelectMode] = useState(false);
   const [selectedMsgs, setSelectedMsgs] = useState<number[]>([]);
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -793,10 +794,32 @@ export default function Home() {
     exitSelectMode();
   };
 
-  const copyMessage = async (content: string) => {
+  const copyMessage = async (content: string, idx: number) => {
+    let ok = false;
     try {
-      await navigator.clipboard.writeText(content);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(content);
+        ok = true;
+      }
     } catch {}
+    if (!ok) {
+      // 回退：非安全上下文(如 http://IP)下 navigator.clipboard 不可用，用临时 textarea + execCommand
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = content;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch {}
+    }
+    if (ok) {
+      setCopiedIdx(idx);
+      setTimeout(() => setCopiedIdx((cur) => (cur === idx ? null : cur)), 1500);
+    }
   };
 
   // 移动端长按唤起编辑态（500ms）；滑动/松手则取消计时
@@ -1492,15 +1515,29 @@ export default function Home() {
                         : msg.content}
                     </div>
                   </div>
-                  {/* 桌面端：悬浮时在气泡下方显示工具栏（参考豆包）；点删除唤起编辑态 */}
+                  {/* AI 输出端工具栏常驻；用户输出端悬浮才显示。点删除唤起编辑态 */}
                   {!selectMode && !isWelcome && (
-                    <div className="mt-1 hidden sm:flex gap-1 opacity-0 group-hover/msg:opacity-100 transition">
+                    <div
+                      className={`mt-1 hidden sm:flex gap-1 transition ${
+                        isUser
+                          ? "opacity-0 group-hover/msg:opacity-100"
+                          : "opacity-100"
+                      }`}
+                    >
                       <button
-                        onClick={() => copyMessage(msg.content)}
-                        title="复制"
-                        className="text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded p-1 transition"
+                        onClick={() => copyMessage(msg.content, i)}
+                        title={copiedIdx === i ? "已复制" : "复制"}
+                        className={`rounded p-1 transition ${
+                          copiedIdx === i
+                            ? "text-emerald-500"
+                            : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"
+                        }`}
                       >
-                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+                        {copiedIdx === i ? (
+                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                        ) : (
+                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+                        )}
                       </button>
                       <button
                         onClick={() => enterSelectMode(i)}
