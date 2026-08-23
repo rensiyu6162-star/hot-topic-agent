@@ -97,6 +97,9 @@ export default function Home() {
   const [hydrated, setHydrated] = useState(false);
   // 跨设备同步（同步码方案，无需登录）
   const [syncCode, setSyncCode] = useState("");
+  // 隐藏设备标识：首次访问自动生成并存本地，仅用于「定时任务」在服务端认领任务、静默回传结果。
+  // 未启用同步码时，定时任务就用它当身份；用户无感，界面不出现。
+  const [deviceId, setDeviceId] = useState("");
   const [showSync, setShowSync] = useState(false);
   const [codeInput, setCodeInput] = useState("");
   const [syncBusy, setSyncBusy] = useState(false);
@@ -165,6 +168,16 @@ export default function Home() {
 
       const savedCode = localStorage.getItem("syncCode");
       if (savedCode) setSyncCode(savedCode);
+
+      // 隐藏设备标识：没有就生成一个（复用同步码格式，满足服务端 code 校验）
+      let dev = localStorage.getItem("deviceId");
+      if (!dev) {
+        dev = genSyncCode();
+        try {
+          localStorage.setItem("deviceId", dev);
+        } catch {}
+      }
+      setDeviceId(dev);
 
       const savedSessions = localStorage.getItem("sessions");
       const savedActive = localStorage.getItem("activeSessionId");
@@ -279,6 +292,28 @@ export default function Home() {
     }
   };
 
+  // 定时任务身份：优先用同步码（有则结果并入同步数据、可跨设备），否则用隐藏设备标识（无感、仅本设备）
+  const scheduleCode = syncCode || deviceId;
+
+  // 仅拉取并合并「⏰ 定时任务」专属会话，不动其它会话/领域设置（供无同步码时静默回传结果用）
+  const pullScheduled = async (code: string) => {
+    if (!code) return;
+    try {
+      const res = await fetch(`/api/sync?code=${encodeURIComponent(code)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const p = data?.payload;
+      const cloudSessions = Array.isArray(p?.sessions) ? p.sessions : [];
+      const sched = cloudSessions.find((s: any) => s?.id === "scheduled");
+      if (!sched) return;
+      skipPush.current = true; // 合并云端定时结果后不要立刻回推
+      setSessions((prev) => {
+        const others = prev.filter((s) => s.id !== "scheduled");
+        return [sched, ...others]; // 定时会话置顶，其余保持不动
+      });
+    } catch {}
+  };
+
   const enableSync = async () => {
     const code = genSyncCode();
     setSyncBusy(true);
@@ -364,10 +399,10 @@ export default function Home() {
     setSettingsOpen(false);
     setSchedMsg(null);
     setShowSchedule(true);
-    if (!syncCode) return; // 未启用同步时，弹窗内提示先启用
+    if (!scheduleCode) return;
     setSchedLoaded(false);
     try {
-      const res = await fetch(`/api/schedule?code=${encodeURIComponent(syncCode)}`);
+      const res = await fetch(`/api/schedule?code=${encodeURIComponent(scheduleCode)}`);
       const data = await res.json();
       if (res.ok && data.config) {
         setSchedEnabled(data.config.enabled !== false);
@@ -383,7 +418,7 @@ export default function Home() {
   };
 
   const saveSchedule = async () => {
-    if (!syncCode) return;
+    if (!scheduleCode) return;
     const times = Array.from(new Set(schedTimes.filter((t) => /^\d{1,2}:\d{2}$/.test(t)))).slice(0, 3);
     if (times.length === 0) {
       setSchedMsg({ ok: false, text: "至少配置一个触发时间" });
@@ -396,7 +431,7 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          code: syncCode,
+          code: scheduleCode,
           enabled: schedEnabled,
           everyDays: schedEveryDays,
           times,
@@ -408,7 +443,7 @@ export default function Home() {
         setSchedMsg({
           ok: true,
           text: schedEnabled
-            ? `已保存：每 ${schedEveryDays} 天于 ${times.join("、")} 自动抓取今日热点`
+            ? `已保存：每 ${schedEveryDays} 天于 ${times.join("、")} 自动抓取今日热点，结果会自动回到本设备`
             : "已保存（定时任务已停用）",
         });
       } else {
@@ -422,14 +457,14 @@ export default function Home() {
   };
 
   const deleteScheduleCfg = async () => {
-    if (!syncCode) return;
+    if (!scheduleCode) return;
     setSchedBusy(true);
     setSchedMsg(null);
     try {
       const res = await fetch("/api/schedule", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: syncCode }),
+        body: JSON.stringify({ code: scheduleCode }),
       });
       if (res.ok) {
         setSchedEnabled(true);
@@ -448,12 +483,13 @@ export default function Home() {
   };
 
 
-  // 首次加载后，若已绑定同步码则自动拉一次云端最新数据
+  // 首次加载后：已绑定同步码则拉全量云端数据（含定时结果）；否则用隐藏设备标识静默拉回定时结果
   useEffect(() => {
     if (!hydrated) return;
     if (syncCode) pullSync(syncCode, true);
+    else if (deviceId) pullScheduled(deviceId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated]);
+  }, [hydrated, deviceId]);
 
   // 数据变化时防抖自动上传（已绑定同步码时）
   useEffect(() => {
@@ -1505,26 +1541,10 @@ export default function Home() {
               </button>
             </div>
 
-            {!syncCode ? (
-              <div className="space-y-3">
-                <p className="text-xs text-gray-500 leading-relaxed">
-                  定时任务在服务端运行（关掉浏览器也会执行），需先启用「同步」以生成身份标识。
-                </p>
-                <button
-                  onClick={() => {
-                    setShowSchedule(false);
-                    setSyncMsg(null);
-                    setShowSync(true);
-                  }}
-                  className="w-full text-sm px-3 py-2 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition"
-                >
-                  去启用同步
-                </button>
-              </div>
-            ) : (
+            {(
               <div className="space-y-4">
                 <p className="text-xs text-gray-500 leading-relaxed">
-                  按设定频率在服务端自动抓取「今日热点」（沿用你当前锁定的领域 / 平台 / 释义），结果追加到专属会话「⏰ 定时任务」。
+                  按设定频率在服务端自动抓取「今日热点」（沿用你当前锁定的领域 / 平台 / 释义），关掉浏览器也会执行，抓完自动回到本设备的「⏰ 定时任务」会话。
                 </p>
 
                 <label className="flex items-center gap-2 text-sm text-gray-700">
@@ -1619,7 +1639,7 @@ export default function Home() {
                 )}
 
                 <p className="text-[11px] text-gray-400 leading-relaxed border-t pt-3">
-                  ⚠️ 定时抓取由服务端常驻进程驱动（部署在 VPS 上生效）；抓取结果需在其他设备用同步码拉取查看。
+                  ⚠️ 定时抓取由服务端常驻进程驱动（部署在 VPS 上生效）；结果会在你下次打开本页面时自动回到本设备。若已启用「同步」，还可在其他设备用同步码查看。
                 </p>
               </div>
             )}
