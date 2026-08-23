@@ -885,13 +885,31 @@ ${JSON.stringify(args.topics, null, 2)}`;
       return scriptRes;
     }
     case "search_recent_topics_by_domain": {
-      const d = (args.domain || domain || "").toString().trim();
-      if (!d)
+      const raw = (args.domain || domain || "").toString().trim();
+      if (!raw)
         return JSON.stringify({ domain: "", range: "近30天", realtime: false, items: [] });
-      const note = (userGlossary[d] || "").trim();
-      const items = await findRecentByDomain(d, 12, note);
+      // 模型可能把【多个领域】一次性传进来（如"bg与bl大战、原生家庭"）。若把整串当成一个
+      // 检索词，SearXNG 几乎搜不到（过窄），这正是"多领域没出兜底"的一条根因。
+      // 所以在这里把领域串拆成单个领域，逐个检索再合并去重——和单领域效果一致。
+      const subs = raw
+        .split(/[、，,\/\s]+/)
+        .map((s: string) => s.trim())
+        .filter(Boolean);
+      const domains = subs.length ? subs : [raw];
+      const merged: { title: string; url: string; source: string }[] = [];
+      const seen = new Set<string>();
+      for (const one of domains) {
+        const note = (userGlossary[one] || "").trim();
+        const items = await findRecentByDomain(one, 12, note);
+        for (const it of items) {
+          if (it.url && !seen.has(it.url)) {
+            seen.add(it.url);
+            merged.push(it);
+          }
+        }
+      }
       return JSON.stringify(
-        { domain: d, range: "近30天", realtime: false, items },
+        { domain: domains.join("、"), range: "近30天", realtime: false, items: merged },
         null,
         2
       );
@@ -1035,13 +1053,19 @@ export async function POST(req: NextRequest) {
           try {
             const parsed = JSON.parse(result);
             const dm = (parsed.domain || "").toString().trim();
-            // 只接受【当前锁定领域】的兜底结果：模型可能沿用历史里的旧领域来调这个工具，
-            // 那些旧领域的近30天条目一旦拼进回复，就是"切换领域后仍返回旧领域"。
-            // 当前清单为空（未锁定领域）时不设限，保持原行为。
+            // 兜底结果的 domain 可能是【单个】也可能是模型一次传进来的【多领域串】
+            //（如"bg与bl大战、原生家庭"），所以按分隔符拆开逐个比对，而不是整体精确匹配——
+            // 否则多领域串永远匹配不上当前清单里的单个领域，会把本该出的兜底整块丢掉（回归）。
+            const dmTokens = dm
+              .split(/[、，,\/\s]+/)
+              .map((s: string) => s.trim())
+              .filter(Boolean);
+            // 只要有【任一】token 属于当前锁定领域就接受；全都不属于（纯旧领域）才丢弃。
+            // 当前清单为空、或 domain 缺失时不设限，保持原行为。
             const domainAllowed =
               currentDomainList.length === 0 ||
-              !dm ||
-              currentDomainList.includes(dm);
+              dmTokens.length === 0 ||
+              dmTokens.some((t: string) => currentDomainList.includes(t));
             if (
               domainAllowed &&
               Array.isArray(parsed?.items) &&
@@ -1055,11 +1079,22 @@ export async function POST(req: NextRequest) {
                   recentFallback.items.push(it);
                 }
               }
-              if (dm && !recentFallback.domain.split("、").includes(dm)) {
-                recentFallback.domain = recentFallback.domain
-                  ? `${recentFallback.domain}、${dm}`
-                  : dm;
+              // 记录命中的当前领域（拆成单个存），供 finalizeFallback 按领域跳过重复兜底
+              const existing = recentFallback.domain
+                ? recentFallback.domain.split("、")
+                : [];
+              const toAdd =
+                dmTokens.length && currentDomainList.length
+                  ? dmTokens.filter((t: string) => currentDomainList.includes(t))
+                  : dmTokens.length
+                    ? dmTokens
+                    : dm
+                      ? [dm]
+                      : [];
+              for (const t of toAdd) {
+                if (t && !existing.includes(t)) existing.push(t);
               }
+              recentFallback.domain = existing.join("、");
             }
           } catch {}
         }
