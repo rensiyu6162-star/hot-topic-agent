@@ -317,9 +317,13 @@ export default function Home() {
   };
 
   const toggleDomain = (d: string) => {
-    setSelectedDomains((prev) =>
-      prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]
-    );
+    setSelectedDomains((prev) => {
+      // 从“全选”状态点某个领域 → 只聚焦它，让每次点击都能明显改变筛选结果
+      const allSelected = prev.length === domainOptions.length;
+      if (allSelected) return [d];
+      if (prev.includes(d)) return prev.filter((x) => x !== d);
+      return [...prev, d];
+    });
   };
 
   const selectAllDomains = () => setSelectedDomains([...domainOptions]);
@@ -405,11 +409,11 @@ export default function Home() {
     setLoading(true);
 
     // 全选默认视为“全部领域”，不做重排；否则把选中的领域传给后端
-    const isAllDefault =
-      domainOptions.length === DOMAINS.length &&
-      selectedDomains.length === DOMAINS.length;
+    const allSelected =
+      selectedDomains.length > 0 &&
+      selectedDomains.length === domainOptions.length;
     const domainStr =
-      isAllDefault || selectedDomains.length === 0
+      allSelected || selectedDomains.length === 0
         ? ""
         : selectedDomains.join("、");
 
