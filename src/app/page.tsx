@@ -449,7 +449,7 @@ export default function Home() {
     }
   };
 
-  const renderDomainChips = () => {
+  const renderDomainChips = (autoFocusInput = false) => {
     const ordered = [
       ...domainOptions.filter((d) => selectedDomains.includes(d)),
       ...domainOptions.filter((d) => !selectedDomains.includes(d)),
@@ -488,7 +488,9 @@ export default function Home() {
         })}
         {showDomainInput ? (
           <input
-            autoFocus
+            ref={(el) => {
+              if (autoFocusInput && el) el.focus({ preventScroll: true });
+            }}
             value={domainInput}
             onChange={(e) => setDomainInput(e.target.value)}
             onKeyDown={(e) => {
@@ -1114,7 +1116,7 @@ export default function Home() {
                     {openMenu === "domain" && (
                       <div className="absolute right-0 top-full mt-2 z-30 w-72 max-w-[80vw] bg-white border rounded-xl shadow-lg p-3">
                         {renderDomainHeader()}
-                        {renderDomainChips()}
+                        {renderDomainChips(true)}
                       </div>
                     )}
                   </div>
@@ -1158,7 +1160,7 @@ export default function Home() {
                     <div className="fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+3.5rem)] z-30 bg-white border rounded-xl shadow-lg p-3 space-y-3">
                       <div>
                         {renderDomainHeader()}
-                        {renderDomainChips()}
+                        {renderDomainChips(true)}
                       </div>
                       <div className="border-t pt-3">
                         {renderPlatformHeader()}
@@ -1202,7 +1204,7 @@ export default function Home() {
           <div ref={selectorsRef} className="space-y-2">
             <div>
               {renderDomainHeader()}
-              {renderDomainChips()}
+              {renderDomainChips(selectorsVisible)}
             </div>
             <div>
               {renderPlatformHeader()}
