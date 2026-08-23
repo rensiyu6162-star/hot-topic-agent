@@ -58,6 +58,13 @@ function sourceOf(url: string): string {
   }
 }
 
+// 权威来源判定：主流新闻门户 + 官媒 + 通讯社。用于给报道取材时优先采信、交叉核对。
+const AUTH_DOMAINS =
+  /thepaper\.cn|sina\.com|news\.163\.com|163\.com|qq\.com|sohu\.com|toutiao\.com|baijiahao\.baidu\.com|people\.com\.cn|xinhuanet\.com|news\.cn|cctv\.com|cnr\.cn|chinanews\.com|chinadaily\.com|gmw\.cn|ce\.cn|cyol\.com|jfdaily\.com|bjnews\.com|nbd\.com|yicai\.com|caixin\.com|ifeng\.com|huanqiu\.com|stcn\.com|cls\.cn/i;
+function isAuthoritative(url: string): boolean {
+  return AUTH_DOMAINS.test(url);
+}
+
 // 把「热搜平台名」映射到 sourceOf() 会产出的来源标签，用于判断文章/视频是否同平台。
 // 例：热搜来自知乎 → 认可 source 为「知乎」的文章；B站 → 「哔哩哔哩」的视频。
 // 返回空数组表示该平台没有可直接抓取的对应站点（如小红书），此时走跨平台兜底。
@@ -231,8 +238,31 @@ export async function POST(req: NextRequest) {
     sites = sites.map((l) => (coreUrls.has(l.url) ? { ...l, core: true } : l));
     videos = videos.map((l) => (coreUrls.has(l.url) ? { ...l, core: true } : l));
 
-    // 严格依据核心来源资料生成报道
-    const report = await genReport(topic, platform || "", groundHits);
+    // 报道取材：不局限于「核心来源」那 1-3 条，而是尽量多汇集权威来源交叉核对。
+    // 从全部文章结果里剔除百科/搜索页与视频，按 (相关性 + 权威加权) 排序取前 8 条，
+    // 再把同平台核心来源并进来去重，一起喂给模型，让它有足够素材还原事实真相。
+    const reportRanked = general
+      .filter((h) => !isVideoUrl(h.url) && !isGenericRef(h.url))
+      .map((h) => ({
+        h,
+        s:
+          relevanceScore(`${h.title} ${h.content}`, core) +
+          (isAuthoritative(h.url) ? 3 : 0),
+      }))
+      .filter((x) => x.s > 0)
+      .sort((a, b) => b.s - a.s)
+      .map((x) => x.h);
+    const reportSeen = new Set<string>();
+    const reportHits: SearchHit[] = [];
+    for (const h of [...groundHits, ...reportRanked]) {
+      if (reportSeen.has(h.url)) continue;
+      reportSeen.add(h.url);
+      reportHits.push(h);
+      if (reportHits.length >= 8) break;
+    }
+
+    // 严格依据搜集到的多篇权威来源生成报道
+    const report = await genReport(topic, platform || "", reportHits);
 
     // 兜底：确实没搜到任何关联内容时才退回搜索页链接
     if (sites.length === 0) {
@@ -294,16 +324,16 @@ async function genReport(
   if (!OPENAI_API_KEY) {
     return `关于「${topic}」的详细报道暂时无法生成，可点击下方参考链接查看更多信息。`;
   }
-  // 用真实搜索到的核心来源当作依据，避免模型对生僻词/网络热词凭空臆测
+  // 用真实搜索到的多篇权威来源当作依据，交叉核对后提炼事实，避免凭空臆测
   const material = hits
-    .slice(0, 6)
-    .map((h, i) => `${i + 1}. ${h.title}｜${h.content}`.trim())
-    .filter((s) => s.length > 3)
+    .slice(0, 8)
+    .map((h, i) => `【来源${i + 1}｜${sourceOf(h.url)}】${h.title}｜${h.content}`.trim())
+    .filter((s) => s.length > 6)
     .join("\n");
   const hasMaterial = material.length > 0;
   const from = platform ? `（来自${platform}热榜）` : "";
   const prompt = hasMaterial
-    ? `以下是关于热点话题「${topic}」${from}的真实搜索资料（核心来源）：\n${material}\n\n请严格依据上述资料写一段简明的详细报道，说明这个热点具体指什么、事件背景与关键信息。要求：只使用资料中确有的信息，不得臆测或编造；若资料相互矛盾或信息不足，如实说明。控制在 200-300 字，中文，客观清晰，直接成段叙述，不要分点或加标题。`
+    ? `以下是关于热点话题「${topic}」${from}的多篇真实搜索资料（含多个来源）：\n${material}\n\n请你像记者核实新闻一样，对照这几篇来源交叉比对，提炼出多篇来源【一致确认】的事实，写成一段简明清晰的详细报道，说明这个热点具体指什么、事件的来龙去脉与关键信息。硬性要求：\n1. 只写多篇来源共同支撑、可以确定的事实真相，表述要明确、肯定；\n2. 对于个别来源提到但无法确认、或各来源说法冲突的细节，直接【略去不写】，不要把它写进报道；\n3. 【严禁】出现"资料未明确""尚不可知""无法确认""未提供原文""细节不详"这类含糊、留白的措辞——报道里呈现的每一句都应是已核实的确定信息；\n4. 绝对不得臆测或编造资料中没有的内容。\n控制在 200-320 字，中文，客观清晰，直接成段叙述，不要分点、不要加标题。`
     : `请就热点话题「${topic}」${from}写一段简明的详细报道，包含事件背景、关键信息、各方观点或影响。若你并不确定该词的确切含义，请说明「暂无足够公开信息」，不要编造。控制在 200-300 字，中文，客观清晰，直接成段叙述。`;
   try {
     const res = await fetchWithTimeout(
