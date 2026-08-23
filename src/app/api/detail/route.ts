@@ -58,6 +58,24 @@ function sourceOf(url: string): string {
   }
 }
 
+// 把「热搜平台名」映射到 sourceOf() 会产出的来源标签，用于判断文章/视频是否同平台。
+// 例：热搜来自知乎 → 认可 source 为「知乎」的文章；B站 → 「哔哩哔哩」的视频。
+// 返回空数组表示该平台没有可直接抓取的对应站点（如小红书），此时走跨平台兜底。
+function platformMatchSources(platform: string): string[] {
+  const p = platform.toLowerCase();
+  if (/知乎|zhihu/.test(p)) return ["知乎"];
+  if (/b站|bili|哔哩/.test(p)) return ["哔哩哔哩"];
+  if (/抖音|douyin/.test(p)) return ["抖音"];
+  if (/微博|weibo/.test(p)) return ["新浪"];
+  if (/头条|toutiao/.test(p)) return ["今日头条", "西瓜视频"];
+  if (/百度|baidu/.test(p)) return ["百家号"];
+  if (/腾讯|qq|v\.qq/.test(p)) return ["腾讯网", "腾讯视频"];
+  if (/网易|163/.test(p)) return ["网易"];
+  if (/澎湃|thepaper/.test(p)) return ["澎湃新闻"];
+  // 小红书、什么值得买等无公开可抓站点 → 空，交给跨平台兜底
+  return [];
+}
+
 // 自建 SearXNG 接口（部署在腾讯云 VPS，中国区 IP）。
 // SEARXNG_URL 例：https://search.example.com 或 http://1.2.3.4:8080
 const SEARXNG_URL = (process.env.SEARXNG_URL || "").replace(/\/+$/, "");
@@ -182,11 +200,30 @@ export async function POST(req: NextRequest) {
       8
     );
 
-    // 取相关性最高的若干条作为「核心来源」——既用来喂给报道当依据，也在参考里打标
+    // 选「核心来源」——既喂给报道当依据，也在参考里打标。
+    // 规则：① 优先取与热搜同平台的文章/视频（知乎热搜→知乎、B站→哔哩哔哩…）；
+    //       ② 该平台没有直接内容时，退而取相关性最高的其它平台内容；③ 最多 1-3 条。
     const byUrl = new Map(
       [...general, ...videoRes].map((h) => [h.url, h] as const)
     );
-    const coreLinks = [...sites, ...videos].slice(0, 5);
+    const scoreOf = (l: Link) => {
+      const h = byUrl.get(l.url);
+      return h ? relevanceScore(`${h.title} ${h.content}`, core) : 0;
+    };
+    // 候选：文章 + 视频，按与话题的相关性从高到低排（搜索页兜底链接此时还没 push 进来）
+    const candidates = [...sites, ...videos].sort(
+      (a, b) => scoreOf(b) - scoreOf(a)
+    );
+    // 把热搜平台名映射到 sourceOf() 产出的来源标签，判断「同平台」
+    const platformSources = platformMatchSources(platform || "");
+    const samePlatform = candidates.filter((l) =>
+      platformSources.includes(l.source)
+    );
+    // 同平台有内容就优先用同平台（最多 3 条）；否则退回最相关的其它平台内容（最多 2 条）
+    const coreLinks =
+      samePlatform.length > 0
+        ? samePlatform.slice(0, 3)
+        : candidates.slice(0, 2);
     const coreUrls = new Set(coreLinks.map((l) => l.url));
     const groundHits = coreLinks
       .map((l) => byUrl.get(l.url))
