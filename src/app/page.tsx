@@ -756,9 +756,13 @@ export default function Home() {
             {renderLineWithTags(cleanMarkdown(line), key)}
             <button
               onClick={() => toggleDetail(key, topic, platform)}
-              className="align-middle ml-2 whitespace-nowrap text-[11px] leading-none px-2 py-1 rounded-full border border-indigo-300 text-indigo-500 hover:bg-indigo-50 transition opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+              className={`align-middle ml-2 whitespace-nowrap text-[11px] leading-none px-2 py-1 rounded-full border transition ${
+                st
+                  ? "opacity-100 border-emerald-300 text-emerald-600 hover:bg-emerald-50"
+                  : "border-indigo-300 text-indigo-500 hover:bg-indigo-50 opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+              }`}
             >
-              {st?.open ? "收起" : "查看详情"}
+              {st?.open ? "收起" : st ? "展开" : "查看详情"}
             </button>
           </div>
           {st?.open && (
