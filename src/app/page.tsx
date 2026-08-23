@@ -67,6 +67,14 @@ export default function Home() {
   const [noteInput, setNoteInput] = useState("");
   // 正在编辑的自创领域名（null 表示当前是「新增」而非「编辑」）
   const [editingDomain, setEditingDomain] = useState<string | null>(null);
+  // 点击「确认」后模型识别出的候选释义列表
+  const [meaningOptions, setMeaningOptions] = useState<string[]>([]);
+  // 是否正在请求候选释义
+  const [meaningLoading, setMeaningLoading] = useState(false);
+  // 已点过「确认」（用于控制界面进入第二步展示候选释义）
+  const [meaningConfirmed, setMeaningConfirmed] = useState(false);
+  // 记录上一次「确认」时的名称，名称变化后需要重新确认
+  const [meaningForName, setMeaningForName] = useState("");
   // 每个自创领域对应的释义：{ 领域名: 释义 }
   const [domainNotes, setDomainNotes] = useState<Record<string, string>>({});
   // 领域/平台收进标题栏的下拉菜单（both 为移动端合并下拉）
@@ -485,6 +493,7 @@ export default function Home() {
     setEditingDomain(null);
     setDomainInput("");
     setNoteInput("");
+    resetMeaning();
     setShowDomainInput(true);
   };
 
@@ -493,6 +502,7 @@ export default function Home() {
     setEditingDomain(d);
     setDomainInput(d);
     setNoteInput(domainNotes[d] || "");
+    resetMeaning();
     setShowDomainInput(true);
   };
 
@@ -501,6 +511,38 @@ export default function Home() {
     setEditingDomain(null);
     setDomainInput("");
     setNoteInput("");
+    resetMeaning();
+  };
+
+  // 清空候选释义相关状态
+  const resetMeaning = () => {
+    setMeaningOptions([]);
+    setMeaningLoading(false);
+    setMeaningConfirmed(false);
+    setMeaningForName("");
+  };
+
+  // 点击「确认」：让模型识别领域含义并给出候选释义
+  const confirmDomainMeaning = async () => {
+    const name = domainInput.trim();
+    if (!name) return;
+    setMeaningConfirmed(true);
+    setMeaningForName(name);
+    setMeaningLoading(true);
+    setMeaningOptions([]);
+    try {
+      const resp = await fetch("/api/domain-meaning", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = await resp.json();
+      setMeaningOptions(Array.isArray(data?.options) ? data.options : []);
+    } catch {
+      setMeaningOptions([]);
+    } finally {
+      setMeaningLoading(false);
+    }
   };
 
   // 保存领域（新增或编辑）：名称必填，释义可选
@@ -1187,18 +1229,70 @@ export default function Home() {
             <div className="space-y-3">
               <div className="space-y-1">
                 <label className="text-xs text-gray-400">领域名称</label>
-                <input
-                  autoFocus
-                  value={domainInput}
-                  onChange={(e) => setDomainInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") saveDomain();
-                    if (e.key === "Escape") closeDomainInput();
-                  }}
-                  placeholder="例如：反bl"
-                  className="w-full px-3 py-2 rounded-lg text-sm border border-gray-300 focus:outline-none focus:ring-1 focus:ring-emerald-400"
-                />
+                <div className="flex gap-2">
+                  <input
+                    autoFocus
+                    value={domainInput}
+                    onChange={(e) => {
+                      setDomainInput(e.target.value);
+                      // 名称变化后需要重新确认
+                      if (e.target.value.trim() !== meaningForName) {
+                        setMeaningConfirmed(false);
+                        setMeaningOptions([]);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") confirmDomainMeaning();
+                      if (e.key === "Escape") closeDomainInput();
+                    }}
+                    placeholder="例如：反bl"
+                    className="flex-1 px-3 py-2 rounded-lg text-sm border border-gray-300 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+                  />
+                  <button
+                    onClick={confirmDomainMeaning}
+                    disabled={!domainInput.trim() || meaningLoading}
+                    className="shrink-0 text-sm px-3 py-2 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {meaningLoading ? "识别中…" : "确认"}
+                  </button>
+                </div>
+                <p className="text-[11px] text-gray-400">
+                  点「确认」让模型识别含义，给出可选释义（也可自己填写，释义可选）
+                </p>
               </div>
+
+              {/* 第二步：模型给出的候选释义 */}
+              {meaningConfirmed && (
+                <div className="space-y-1.5">
+                  <label className="text-xs text-gray-400">可选释义</label>
+                  {meaningLoading ? (
+                    <div className="text-xs text-gray-400 py-1">正在识别「{domainInput.trim()}」的含义…</div>
+                  ) : meaningOptions.length > 0 ? (
+                    <div className="flex flex-col gap-1.5">
+                      {meaningOptions.map((opt, i) => {
+                        const active = noteInput.trim() === opt;
+                        return (
+                          <button
+                            key={i}
+                            onClick={() => setNoteInput(opt)}
+                            className={
+                              "text-left text-xs px-3 py-2 rounded-lg border transition " +
+                              (active
+                                ? "border-emerald-400 bg-emerald-50 text-emerald-700"
+                                : "border-gray-200 text-gray-600 hover:border-emerald-300 hover:bg-emerald-50/40")
+                            }
+                          >
+                            {opt}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-400 py-1">没有识别到合适的释义，可在下方自行填写。</div>
+                  )}
+                </div>
+              )}
+
               <div className="space-y-1">
                 <label className="text-xs text-gray-400">
                   释义（可选，帮助更精准地判断该领域）
