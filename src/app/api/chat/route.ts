@@ -646,6 +646,57 @@ function appendRecentFallback(
   return (content || "").trimEnd() + block;
 }
 
+// 收尾兜底（多领域可靠版）：模型在回复末尾输出隐藏标记 [[NO_TODAY:领域1、领域2]] 列出"今日一条都没有"的领域。
+// 这里解析标记，对其中每个尚未有兜底结果的领域【服务端主动】补跑近30天拆词检索，合并进 recentFallback，
+// 再把标记从正文剥掉，最后统一由 appendRecentFallback 拼进正文。
+// 为什么这样做：多领域搜索时，靠模型在 5 轮迭代里自己逐个调 search_recent 工具很不可靠（预算耗尽/只用文字说"暂无"），
+// 而 ensureNicheFallback 又只覆盖命中词表或填了释义的领域，自定义窄领域（如「原生家庭」）会漏掉。标记是最可靠的"哪些领域今日为空"信号。
+// 若模型没输出标记（忘了），回退到原有的 ensureNicheFallback 安全网。
+async function finalizeFallback(
+  content: string,
+  domain: string,
+  recentFallback: {
+    domain: string;
+    items: { title: string; url: string; source: string }[];
+  } | null,
+  userGlossary: Record<string, string> = {}
+): Promise<string> {
+  const raw = content || "";
+  const marker = raw.match(/\[\[NO_TODAY:([^\]]*)\]\]/);
+  const stripped = raw.replace(/\[\[NO_TODAY:[^\]]*\]\]/g, "").trimEnd();
+  let fb = recentFallback;
+  if (marker) {
+    const emptyDomains = marker[1]
+      .split(/[、，,\/\s]+/)
+      .map((d) => d.trim())
+      .filter(Boolean);
+    for (const d of emptyDomains) {
+      if (fb && fb.domain.split("、").includes(d)) continue; // 已有该领域兜底结果
+      const note =
+        (userGlossary[d] || "").trim() ||
+        DOMAIN_GLOSSARY.find((g) => g.test.test(d))?.note ||
+        "";
+      const items = await findRecentByDomain(d, 12, note);
+      if (items.length === 0) continue;
+      if (!fb) fb = { domain: "", items: [] };
+      const seen = new Set(fb.items.map((x) => x.url));
+      for (const it of items) {
+        if (it.url && !seen.has(it.url)) {
+          seen.add(it.url);
+          fb.items.push(it);
+        }
+      }
+      if (!fb.domain.split("、").includes(d)) {
+        fb.domain = fb.domain ? `${fb.domain}、${d}` : d;
+      }
+    }
+  } else {
+    // 模型没输出标记：退回到原有安全网（覆盖命中词表/填了释义的小众领域）
+    fb = await ensureNicheFallback(domain, fb, userGlossary);
+  }
+  return appendRecentFallback(stripped, fb);
+}
+
 function buildSystemPrompt(
   domain: string,
   platforms: string[],
@@ -698,7 +749,7 @@ function buildSystemPrompt(
   return `你是一个专业的自媒体热点分析 Agent。${domainHint}目标平台是：${platforms.join("、")}。
 ${
   domain
-    ? `\n🔒【领域锁定 = 最高优先级，凌驾于用户本次说法之上】用户已在界面锁定创作领域「${domain}」。这是一个持续生效的硬性过滤器：无论用户这次说的是"抓取热点""抓今日热点""全量热榜""原始热点"还是任何类似说法，你最终展示给用户的内容都【必须】只保留真正属于「${domain}」的热点，其余一律丢弃、不得出现。抓取阶段可以照常抓全量，但【展示前必须按领域过滤】。绝对不允许因为用户说了"抓取/全量/原始/不做额外操作"就把所有平台的热点原样堆出来——那是错误行为。\n- ⚠️【当前领域集合是唯一权威，以本条为准】本次锁定的领域【完整清单】就是：${domainList.map((d) => `「${d}」`).join("、")}，共 ${domainList.length} 个。用户随时可能在界面上增删领域，所以【对话历史里出现过的领域组合可能已经过期】。你【必须】以本条系统提示里的这份清单为准，对清单里的【每一个】领域都主动去抓取、筛选、归类——包括刚新增的领域。绝对不要沿用你之前回复里用过的旧领域集合。\n- ⚠️【每次抓取都要真跑，禁止偷懒复用】只要用户要求抓取/刷新/再来一次，你就【必须】重新调用 fetch_hot_topics 并按当前完整领域清单重新过滤，输出全新结果。【严禁】回复"无变化""仍是N条""数据没更新""内容重复""与其让你等待"这类话，也【严禁】直接把上一轮的列表原样再贴一遍——因为用户很可能刚改动了所选领域，"无变化"几乎一定是错的。\n- 🆕【小众领域今日无热点时，自动做近30天兜底】如果某个锁定领域（尤其是小众/垂直领域，如「反bl」）在今日各平台实时热榜里【逐条筛选后一条相关的都没有】，你【必须】调用 search_recent_topics_by_domain(domain) 检索该领域近30天内的相关内容作为兜底。但是【重要】：你自己【不要】把这些近30天条目一条条列出来，也【不要】写"📌 近30天相关内容"之类的小标题——系统会在你回复的末尾【自动追加】这份近30天列表并加好说明。你只需要用一句话说明"今日各平台实时热榜暂无「${domain}」相关热点，以下为近30天相关内容"即可，剩下的列表交给系统追加，避免重复。不要因为今日没热点就只回一句"暂无相关热点"草草了事。\n`
+    ? `\n🔒【领域锁定 = 最高优先级，凌驾于用户本次说法之上】用户已在界面锁定创作领域「${domain}」。这是一个持续生效的硬性过滤器：无论用户这次说的是"抓取热点""抓今日热点""全量热榜""原始热点"还是任何类似说法，你最终展示给用户的内容都【必须】只保留真正属于「${domain}」的热点，其余一律丢弃、不得出现。抓取阶段可以照常抓全量，但【展示前必须按领域过滤】。绝对不允许因为用户说了"抓取/全量/原始/不做额外操作"就把所有平台的热点原样堆出来——那是错误行为。\n- ⚠️【当前领域集合是唯一权威，以本条为准】本次锁定的领域【完整清单】就是：${domainList.map((d) => `「${d}」`).join("、")}，共 ${domainList.length} 个。用户随时可能在界面上增删领域，所以【对话历史里出现过的领域组合可能已经过期】。你【必须】以本条系统提示里的这份清单为准，对清单里的【每一个】领域都主动去抓取、筛选、归类——包括刚新增的领域。绝对不要沿用你之前回复里用过的旧领域集合。\n- ⚠️【每次抓取都要真跑，禁止偷懒复用】只要用户要求抓取/刷新/再来一次，你就【必须】重新调用 fetch_hot_topics 并按当前完整领域清单重新过滤，输出全新结果。【严禁】回复"无变化""仍是N条""数据没更新""内容重复""与其让你等待"这类话，也【严禁】直接把上一轮的列表原样再贴一遍——因为用户很可能刚改动了所选领域，"无变化"几乎一定是错的。\n- 🆕【今日无热点的领域，用隐藏标记交给系统兜底，不要自己检索】对本次锁定的【每一个】领域，你都要逐条筛选今日各平台实时热榜。如果某个领域【逐条筛选后一条相关的都没有】（尤其是小众/垂直领域，如「反bl」「原生家庭」），你【不要】自己去调 search_recent_topics_by_domain、也【不要】自己罗列任何近30天条目，而是做两件事：(1) 在正文里对该领域用一句话说明"今日各平台实时热榜暂无「该领域」相关热点，以下为近30天相关内容"；(2) 在【整个回复的最末尾、单独成行】输出一行隐藏标记，把所有"今日一条都没有"的领域名列进去，格式【严格】为：[[NO_TODAY:领域1、领域2]]（多个领域用、分隔；只列今日确实一条相关都没有的领域；若所有领域今日都有热点，就【绝对不要】输出这个标记）。⚠️这行标记必须【原样、单独成行、放在最后】——系统会读取它，自动为每个领域检索近30天内容并追加到回复末尾（用户看不到这行标记）。切记你自己【不要】写"📌 近30天相关内容"之类小标题或罗列条目，避免和系统追加的内容重复。不要因为今日没热点就只回一句"暂无相关热点"草草了事。\n`
     : ""
 }
 你的能力：
@@ -880,12 +931,12 @@ export async function POST(req: NextRequest) {
 
       // If no tool calls, return the final text
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
-        // 安全网：小众领域即使模型没调兜底工具，也主动补一次拆词检索
-        recentFallback = await ensureNicheFallback(domain, recentFallback, userGlossary);
         return NextResponse.json({
-          content: appendRecentFallback(
+          content: await finalizeFallback(
             assistantMessage.content || "完成。",
-            recentFallback
+            domain,
+            recentFallback,
+            userGlossary
           ),
           toolLogs,
         });
@@ -943,11 +994,13 @@ export async function POST(req: NextRequest) {
     });
     const finalMsg = await callLLM(conversationMessages, false);
 
-    // 安全网：小众领域即使模型没调兜底工具，也主动补一次拆词检索
-    recentFallback = await ensureNicheFallback(domain, recentFallback, userGlossary);
-
     return NextResponse.json({
-      content: appendRecentFallback(finalMsg || "已完成处理。", recentFallback),
+      content: await finalizeFallback(
+        finalMsg || "已完成处理。",
+        domain,
+        recentFallback,
+        userGlossary
+      ),
       toolLogs,
     });
   } catch (e: any) {
