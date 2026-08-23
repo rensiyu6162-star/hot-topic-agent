@@ -123,12 +123,14 @@ export default function Home() {
   const [showSchedule, setShowSchedule] = useState(false);
   const [schedEnabled, setSchedEnabled] = useState(true);
   const [schedEveryDays, setSchedEveryDays] = useState(1);
-  const [schedTimes, setSchedTimes] = useState<string[]>(["09:00", "12:00", "16:00"]);
+  const [schedTimes, setSchedTimes] = useState<string[]>(["09:00"]);
   // 开始日期默认当天，结束日期选填（空=一直执行）
   const [schedStartDate, setSchedStartDate] = useState("");
   const [schedEndDate, setSchedEndDate] = useState("");
   // 结束日期为空时展示「永久运行」占位，点击后切换为原生日期选择器
   const [schedEndEditing, setSchedEndEditing] = useState(false);
+  // 是否处于可编辑状态：已保存过配置时先进入只读态（按钮显示「编辑」），点编辑后才可改
+  const [schedEditMode, setSchedEditMode] = useState(true);
   // 定时任务专属的领域 / 平台选择（与主页面互不影响；打开时默认填充主页面当前选择）
   const [schedDomains, setSchedDomains] = useState<string[]>([]);
   const [schedPlatforms, setSchedPlatforms] = useState<string[]>([]);
@@ -452,9 +454,11 @@ export default function Home() {
     setSchedStartDate(todayStr());
     setSchedEndDate("");
     setSchedEndEditing(false);
-    setSchedTimes(["09:00", "12:00", "16:00"]);
+    setSchedTimes(["09:00"]);
     setSchedDomains([...selectedDomains].slice(0, MAX_DOMAINS));
     setSchedPlatforms([...selectedPlatforms]);
+    // 没有同步码 = 全新配置，直接可编辑
+    setSchedEditMode(true);
     if (!scheduleCode) return;
     setSchedLoaded(false);
     try {
@@ -467,12 +471,14 @@ export default function Home() {
         setSchedTimes(
           Array.isArray(cfg.times) && cfg.times.length
             ? cfg.times
-            : ["09:00", "12:00", "16:00"]
+            : ["09:00"]
         );
         // 已有配置：回显开始/结束日期与领域/平台
         setSchedStartDate(cfg.anchor || todayStr());
         setSchedEndDate(cfg.endDate || "");
         setSchedEndEditing(false);
+        // 已存在配置 → 先进入只读态，按钮显示「编辑」
+        setSchedEditMode(false);
         const snap = cfg.snapshot || {};
         setSchedDomains(
           typeof snap.domain === "string" && snap.domain
@@ -558,10 +564,11 @@ export default function Home() {
       if (res.ok) {
         setSchedEnabled(true);
         setSchedEveryDays(1);
-        setSchedTimes(["09:00", "12:00", "16:00"]);
+        setSchedTimes(["09:00"]);
         setSchedStartDate(todayStr());
         setSchedEndDate("");
         setSchedEndEditing(false);
+        setSchedEditMode(true);
         setSchedDomains([...selectedDomains].slice(0, MAX_DOMAINS));
         setSchedPlatforms([...selectedPlatforms]);
         setSchedMsg({ ok: true, text: "已删除定时任务" });
@@ -1701,8 +1708,9 @@ export default function Home() {
                   <input
                     type="checkbox"
                     checked={schedEnabled}
+                    disabled={!schedEditMode}
                     onChange={(e) => setSchedEnabled(e.target.checked)}
-                    className="w-4 h-4"
+                    className="w-4 h-4 disabled:opacity-50"
                   />
                   启用
                 </label>
@@ -1719,10 +1727,14 @@ export default function Home() {
               <div className="space-y-4">
                 <div
                   className={`space-y-4 transition ${
-                    schedEnabled ? "" : "opacity-40 pointer-events-none grayscale"
+                    !schedEditMode
+                      ? "opacity-60 pointer-events-none"
+                      : schedEnabled
+                      ? ""
+                      : "opacity-40 pointer-events-none grayscale"
                   }`}
                 >
-                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-gray-700">
+                  <div className="space-y-2 text-sm text-gray-700">
                   <div className="flex items-center gap-2">
                     <span>开始日期</span>
                     <input
@@ -1897,13 +1909,22 @@ export default function Home() {
                   >
                     删除任务
                   </button>
-                  <button
-                    onClick={saveSchedule}
-                    disabled={schedBusy}
-                    className="text-sm px-6 py-1.5 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition ml-auto"
-                  >
-                    {schedBusy ? "处理中…" : "保存"}
-                  </button>
+                  {schedEditMode ? (
+                    <button
+                      onClick={saveSchedule}
+                      disabled={schedBusy}
+                      className="text-sm px-6 py-1.5 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition ml-auto"
+                    >
+                      {schedBusy ? "处理中…" : "保存"}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => setSchedEditMode(true)}
+                      className="text-sm px-6 py-1.5 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition ml-auto"
+                    >
+                      编辑
+                    </button>
+                  )}
                 </div>
 
                 {schedMsg && (
