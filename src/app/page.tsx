@@ -1688,7 +1688,18 @@ export default function Home() {
           />
           <div className="relative z-10 w-full max-w-md bg-white rounded-2xl shadow-xl p-5 space-y-4">
             <div className="flex items-center justify-between">
-              <span className="font-bold text-gray-800">⏰ 定时任务</span>
+              <div className="flex items-center gap-4">
+                <span className="font-bold text-gray-800">⏰ 定时任务</span>
+                <label className="flex items-center gap-1.5 text-sm text-gray-700 font-normal">
+                  <input
+                    type="checkbox"
+                    checked={schedEnabled}
+                    onChange={(e) => setSchedEnabled(e.target.checked)}
+                    className="w-4 h-4"
+                  />
+                  启用
+                </label>
+              </div>
               <button
                 onClick={() => setShowSchedule(false)}
                 className="text-gray-400 hover:text-gray-600 text-lg leading-none"
@@ -1699,17 +1710,12 @@ export default function Home() {
 
             {(
               <div className="space-y-4">
-                <label className="flex items-center gap-2 text-sm text-gray-700">
-                  <input
-                    type="checkbox"
-                    checked={schedEnabled}
-                    onChange={(e) => setSchedEnabled(e.target.checked)}
-                    className="w-4 h-4"
-                  />
-                  启用定时任务
-                </label>
-
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-gray-700">
+                <div
+                  className={`space-y-4 transition ${
+                    schedEnabled ? "" : "opacity-40 pointer-events-none grayscale"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-gray-700">
                   <div className="flex items-center gap-2">
                     <span>开始日期</span>
                     <input
@@ -1860,6 +1866,7 @@ export default function Home() {
                       );
                     })}
                   </div>
+                </div>
                 </div>
 
 
