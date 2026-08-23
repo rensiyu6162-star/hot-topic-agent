@@ -1712,7 +1712,7 @@ export default function Home() {
                     checked={schedEnabled}
                     disabled={!schedEditMode}
                     onChange={(e) => setSchedEnabled(e.target.checked)}
-                    className="w-4 h-4 disabled:opacity-50"
+                    className="w-4 h-4 disabled:opacity-70"
                   />
                   启用
                 </label>
@@ -1729,11 +1729,11 @@ export default function Home() {
               <div className="space-y-4">
                 <div
                   className={`space-y-4 transition ${
-                    !schedEditMode
-                      ? "opacity-60 pointer-events-none"
-                      : schedEnabled
-                      ? ""
-                      : "opacity-40 pointer-events-none grayscale"
+                    !schedEnabled
+                      ? "opacity-40 pointer-events-none grayscale"
+                      : !schedEditMode
+                      ? "pointer-events-none [&_input]:opacity-50 [&_select]:opacity-50 [&_button]:opacity-50"
+                      : ""
                   }`}
                 >
                   <div className="space-y-2 text-sm text-gray-700">
