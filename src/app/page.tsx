@@ -2007,7 +2007,7 @@ export default function Home() {
                           : "border-gray-300 text-gray-500 hover:border-emerald-300"
                       }`}
                     >
-                      领域 {selectedDomains.length}/{domainOptions.length} ▾
+                      领域 ▾
                     </button>
                     {openMenu === "domain" && (
                       <div className="absolute right-0 top-full mt-2 z-30 w-72 max-w-[80vw] bg-white border rounded-xl shadow-lg p-3">
