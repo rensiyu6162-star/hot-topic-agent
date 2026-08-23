@@ -485,6 +485,39 @@ async function expandDomainKeywords(name: string, note = ""): Promise<string[]> 
   return arr;
 }
 
+// 相关性过滤：领域词常是有歧义的缩写/自造词（如「bg」既是"男女cp"又是地球科学期刊/国家代码），
+// 直接检索会混入大量【不符原意】的结果。这里用领域的准确含义（用户释义优先，否则内置词表 note）
+// 逐条判断候选标题是否真的符合，剔除明显跑题的。没有可比对的精确含义时不过滤。
+async function filterByRelevance(
+  name: string,
+  note: string,
+  items: { title: string; url: string; source: string }[]
+): Promise<{ title: string; url: string; source: string }[]> {
+  if (items.length === 0) return items;
+  const meaning =
+    note.trim() ||
+    (DOMAIN_GLOSSARY.find((g) => g.test.test(name))?.note || "").trim();
+  if (!meaning) return items; // 没有精确含义可比对，不做过滤
+  const list = items.map((it, i) => `${i}. ${it.title}`).join("\n");
+  const prompt = `领域「${name.trim()}」的准确含义是：${meaning}
+下面是一批候选内容的标题，请逐条判断它是否【确实符合】上述含义。
+明显不符原意的必须剔除——例如同名缩写的其它意思、无关的学科/期刊/机构/国家代码、纯词义解释/百科词条等。只要拿不准是否真的在讲这个含义，就当作不符合。
+只返回一个 JSON 数组，元素是【符合】条目的序号（整数），例如 [0,2,3]；若全部不符合就返回 []。不要任何解释。
+
+${list}`;
+  try {
+    const res: string = await callLLM([{ role: "user", content: prompt }], false);
+    const m = res.match(/\[[\s\S]*\]/);
+    if (!m) return items;
+    const keep = new Set<number>(
+      (JSON.parse(m[0]) as unknown[]).filter((n): n is number => Number.isInteger(n))
+    );
+    return items.filter((_, i) => keep.has(i));
+  } catch {
+    return items;
+  }
+}
+
 // 兜底发现：把领域词拆解成一组相关检索词（原始词 + 内置词表 + LLM 通用展开），逐个跑 SearXNG 聚合去重。
 // ⚠️ SearXNG 的 time_range 过滤很激进：很多引擎不返回日期，会被 time_range 直接过滤成 0 条——
 // 这正是"一个月都没有返回结果"的根因。所以这里【渐进放宽】：近一个月 → 近一年 → 不限时间，
@@ -504,7 +537,14 @@ async function findRecentByDomain(
   if (!hit || note.trim()) {
     expanded = await expandDomainKeywords(d, note);
   }
-  const queries = Array.from(new Set([d, ...(hit?.queries || []), ...expanded]));
+  // 原始领域词只有在"自身就有明确检索意义"时才直接搜：无释义时照搜；有释义但原始词是纯拉丁短缩写
+  // （如「bg」「bl」）时，直接搜会命中大量同名歧义内容（期刊/国家代码…），所以【不搜原始词】，
+  // 改用展开词。含中文的领域词（如「反bl」）语义明确，仍保留原始词优先搜。
+  const rawIsMeaningful = !note.trim() || /[\u4e00-\u9fff]/.test(d);
+  let queries = Array.from(
+    new Set([...(rawIsMeaningful ? [d] : []), ...(hit?.queries || []), ...expanded])
+  );
+  if (queries.length === 0) queries = [d]; // 兜底：展开失败也至少搜原始词
 
   const collect = async (
     timeRange: "month" | "year" | ""
@@ -538,7 +578,9 @@ async function findRecentByDomain(
     }
   if (out.length >= 3) break; // 已经拿到足够结果，不再继续放宽
   }
-  return out.slice(0, limit);
+  // 剔除明显不符领域原意的结果（如「bg=男女cp」误命中地球科学期刊 BG、国家代码等）
+  const relevant = await filterByRelevance(d, note, out);
+  return relevant.slice(0, limit);
 }
 
 // 兜底安全网：模型有时嘴上说"该领域今日无热点"却【没真的调用】兜底工具，导致气泡框不出现。
