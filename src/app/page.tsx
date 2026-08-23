@@ -91,6 +91,7 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const selectorsRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const skipPush = useRef(false);
 
@@ -1235,29 +1236,38 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Quick Actions */}
-      {messages.length <= 1 && (
-        <div className="px-4 pb-2">
-          <div className="max-w-[57.6rem] mx-auto w-full flex flex-wrap gap-2">
-            {["帮我抓取今日热点", "筛选相关热点并生成脚本", "有哪些爆款选题"].map(
-              (hint) => (
-                <button
-                  key={hint}
-                  onClick={() => sendMessage(hint)}
-                  className="text-xs bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-100 transition"
-                >
-                  {hint}
-                </button>
-              )
-            )}
-          </div>
+      {/* Quick Actions：每次新对话/重新打开都常驻，方便一键发送常用指令 */}
+      <div className="px-4 pb-2">
+        <div className="max-w-[57.6rem] mx-auto w-full flex flex-wrap gap-2">
+          {[
+            { label: "帮我抓取今日热点", prompt: "帮我抓取今日热点", send: true },
+            { label: "根据领域筛选热点", prompt: "根据XX领域筛选热点", send: false },
+            { label: "帮我生成视频脚本", prompt: "帮我生成视频脚本", send: true },
+          ].map((q) => (
+            <button
+              key={q.label}
+              disabled={loading}
+              onClick={() => {
+                if (q.send) {
+                  sendMessage(q.prompt);
+                } else {
+                  setInput(q.prompt);
+                  inputRef.current?.focus();
+                }
+              }}
+              className="text-xs bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-100 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {q.label}
+            </button>
+          ))}
         </div>
-      )}
+      </div>
 
       {/* Input */}
       <div className="border-t bg-white px-4 py-3 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <div className="flex gap-2 max-w-[57.6rem] mx-auto">
           <input
+            ref={inputRef}
             className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
             placeholder="输入你的需求，例如：帮我看看今天有什么热点"
             value={input}
