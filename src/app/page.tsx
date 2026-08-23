@@ -66,6 +66,12 @@ export default function Home() {
   const [selectedDomains, setSelectedDomains] = useState<string[]>([...DOMAINS]);
   const [showDomainInput, setShowDomainInput] = useState(false);
   const [domainInput, setDomainInput] = useState("");
+  // 添加/编辑领域时填写的释义（含义说明），传给后端做精确判定
+  const [noteInput, setNoteInput] = useState("");
+  // 正在编辑的自创领域名（null 表示当前是「新增」而非「编辑」）
+  const [editingDomain, setEditingDomain] = useState<string | null>(null);
+  // 每个自创领域对应的释义：{ 领域名: 释义 }
+  const [domainNotes, setDomainNotes] = useState<Record<string, string>>({});
   // 领域/平台收进标题栏的下拉菜单（both 为移动端合并下拉）
   const [openMenu, setOpenMenu] = useState<null | "domain" | "platform" | "both">(null);
   // 顶部完整选择区是否还在可视范围内（滚出后才在标题栏显示下拉入口）
@@ -135,8 +141,10 @@ export default function Home() {
     try {
       const savedOptions = localStorage.getItem("domainOptions");
       const savedSelected = localStorage.getItem("selectedDomains");
+      const savedNotes = localStorage.getItem("domainNotes");
       if (savedOptions) setDomainOptions(JSON.parse(savedOptions));
       if (savedSelected) setSelectedDomains(JSON.parse(savedSelected));
+      if (savedNotes) setDomainNotes(JSON.parse(savedNotes));
 
       const savedCode = localStorage.getItem("syncCode");
       if (savedCode) setSyncCode(savedCode);
@@ -177,10 +185,11 @@ export default function Home() {
     try {
       localStorage.setItem("domainOptions", JSON.stringify(domainOptions));
       localStorage.setItem("selectedDomains", JSON.stringify(selectedDomains));
+      localStorage.setItem("domainNotes", JSON.stringify(domainNotes));
       localStorage.setItem("sessions", JSON.stringify(sessions));
       localStorage.setItem("activeSessionId", activeId);
     } catch {}
-  }, [hydrated, domainOptions, selectedDomains, sessions, activeId]);
+  }, [hydrated, domainOptions, selectedDomains, domainNotes, sessions, activeId]);
 
   // ===== 跨设备同步 =====
   const buildPayload = () => ({
@@ -188,6 +197,7 @@ export default function Home() {
     activeId,
     domainOptions,
     selectedDomains,
+    domainNotes,
   });
 
   const applyPayload = (p: any) => {
@@ -201,6 +211,8 @@ export default function Home() {
     }
     if (Array.isArray(p.domainOptions)) setDomainOptions(p.domainOptions);
     if (Array.isArray(p.selectedDomains)) setSelectedDomains(p.selectedDomains);
+    if (p.domainNotes && typeof p.domainNotes === "object")
+      setDomainNotes(p.domainNotes);
   };
 
   const pushSync = async (code: string) => {
@@ -316,7 +328,7 @@ export default function Home() {
     if (pushTimer.current) clearTimeout(pushTimer.current);
     pushTimer.current = setTimeout(() => pushSync(syncCode), 1500);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions, domainOptions, selectedDomains, activeId, syncCode, hydrated]);
+  }, [sessions, domainOptions, selectedDomains, domainNotes, activeId, syncCode, hydrated]);
 
   const togglePlatform = (p: string) => {
     setSelectedPlatforms((prev) =>
@@ -339,22 +351,79 @@ export default function Home() {
   const selectAllPlatforms = () => setSelectedPlatforms([...PLATFORMS]);
   const clearPlatforms = () => setSelectedPlatforms([]);
 
-  const addCustomDomain = () => {
-    const d = domainInput.trim();
-    if (!d) {
-      setShowDomainInput(false);
+  // 打开「新增领域」弹窗
+  const openAddDomain = () => {
+    setEditingDomain(null);
+    setDomainInput("");
+    setNoteInput("");
+    setShowDomainInput(true);
+  };
+
+  // 打开「编辑领域」弹窗，回显名称与释义
+  const openEditDomain = (d: string) => {
+    setEditingDomain(d);
+    setDomainInput(d);
+    setNoteInput(domainNotes[d] || "");
+    setShowDomainInput(true);
+  };
+
+  const closeDomainInput = () => {
+    setShowDomainInput(false);
+    setEditingDomain(null);
+    setDomainInput("");
+    setNoteInput("");
+  };
+
+  // 保存领域（新增或编辑）：名称必填，释义可选
+  const saveDomain = () => {
+    const name = domainInput.trim();
+    const note = noteInput.trim();
+    if (!name) {
+      closeDomainInput();
       return;
     }
-    setDomainOptions((prev) => (prev.includes(d) ? prev : [...prev, d]));
-    setSelectedDomains((prev) => (prev.includes(d) ? prev : [...prev, d]));
-    setDomainInput("");
-    setShowDomainInput(false);
+    const old = editingDomain;
+    if (old && old !== name) {
+      // 编辑时改了名字：在选项/已选里替换旧名，并迁移释义
+      setDomainOptions((prev) =>
+        prev.map((x) => (x === old ? name : x)).filter((x, i, a) => a.indexOf(x) === i)
+      );
+      setSelectedDomains((prev) =>
+        prev.includes(old)
+          ? prev.map((x) => (x === old ? name : x)).filter((x, i, a) => a.indexOf(x) === i)
+          : prev
+      );
+      setDomainNotes((prev) => {
+        const next = { ...prev };
+        delete next[old];
+        if (note) next[name] = note;
+        return next;
+      });
+    } else {
+      // 新增，或编辑时名字没变
+      setDomainOptions((prev) => (prev.includes(name) ? prev : [...prev, name]));
+      setSelectedDomains((prev) => (prev.includes(name) ? prev : [...prev, name]));
+      setDomainNotes((prev) => {
+        const next = { ...prev };
+        if (note) next[name] = note;
+        else delete next[name];
+        return next;
+      });
+    }
+    closeDomainInput();
   };
 
   const deleteDomain = (d: string) => {
     setDomainOptions((prev) => prev.filter((x) => x !== d));
     setSelectedDomains((prev) => prev.filter((x) => x !== d));
+    setDomainNotes((prev) => {
+      const next = { ...prev };
+      delete next[d];
+      return next;
+    });
     setPendingDeleteDomain(null);
+    // 若正在编辑的就是被删的领域，一并关闭弹窗
+    if (editingDomain === d) closeDomainInput();
   };
 
   const createSession = () => {
@@ -425,6 +494,13 @@ export default function Home() {
         ? ""
         : selectedDomains.join("、");
 
+    // 把用户为(已选)自创领域填写的释义一并传给后端，用于精确判定
+    const glossary: Record<string, string> = {};
+    for (const d of selectedDomains) {
+      const note = domainNotes[d];
+      if (note && note.trim()) glossary[d] = note.trim();
+    }
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -436,6 +512,7 @@ export default function Home() {
           })),
           domain: domainStr,
           platforms: selectedPlatforms,
+          glossary,
         }),
       });
       const data = await res.json();
@@ -462,6 +539,7 @@ export default function Home() {
   };
 
   const renderDomainChips = (autoFocusInput = false) => {
+    void autoFocusInput;
     const ordered = [
       ...domainOptions.filter((d) => selectedDomains.includes(d)),
       ...domainOptions.filter((d) => !selectedDomains.includes(d)),
@@ -475,6 +553,7 @@ export default function Home() {
             <button
               key={d}
               onClick={() => toggleDomain(d)}
+              title={domainNotes[d] || undefined}
               className={`px-3 py-1 rounded-full text-xs border transition flex items-center gap-1 ${
                 active
                   ? "bg-emerald-500 text-white border-emerald-500"
@@ -482,48 +561,32 @@ export default function Home() {
               }`}
             >
               <span>{d}</span>
-              {custom && !active && (
+              {custom && (
                 <span
                   role="button"
-                  title="删除自定义领域"
+                  title="编辑自定义领域"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setPendingDeleteDomain(d);
+                    openEditDomain(d);
                   }}
-                  className="ml-0.5 text-gray-400 hover:text-red-500 leading-none"
+                  className={`ml-0.5 leading-none ${
+                    active
+                      ? "text-white/80 hover:text-white"
+                      : "text-gray-400 hover:text-emerald-500"
+                  }`}
                 >
-                  ✕
+                  ✎
                 </span>
               )}
             </button>
           );
         })}
-        {showDomainInput ? (
-          <input
-            ref={(el) => {
-              if (autoFocusInput && el) el.focus({ preventScroll: true });
-            }}
-            value={domainInput}
-            onChange={(e) => setDomainInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") addCustomDomain();
-              if (e.key === "Escape") {
-                setShowDomainInput(false);
-                setDomainInput("");
-              }
-            }}
-            onBlur={addCustomDomain}
-            placeholder="输入领域后回车"
-            className="px-2 py-1 rounded-full text-xs border border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 w-32"
-          />
-        ) : (
-          <button
-            onClick={() => setShowDomainInput(true)}
-            className="px-3 py-1 rounded-full text-xs border border-dashed border-gray-400 text-gray-500 hover:border-emerald-400 hover:text-emerald-500 transition"
-          >
-            ＋ 添加
-          </button>
-        )}
+        <button
+          onClick={openAddDomain}
+          className="px-3 py-1 rounded-full text-xs border border-dashed border-gray-400 text-gray-500 hover:border-emerald-400 hover:text-emerald-500 transition"
+        >
+          ＋ 添加
+        </button>
       </div>
     );
   };
@@ -856,6 +919,75 @@ export default function Home() {
               >
                 删除
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 添加 / 编辑自定义领域 */}
+      {showDomainInput && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={closeDomainInput}
+          />
+          <div className="relative z-10 w-full max-w-sm bg-white rounded-2xl shadow-xl p-5 space-y-4">
+            <div className="font-bold text-gray-800">
+              {editingDomain ? "编辑领域" : "添加领域"}
+            </div>
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-xs text-gray-400">领域名称</label>
+                <input
+                  autoFocus
+                  value={domainInput}
+                  onChange={(e) => setDomainInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") saveDomain();
+                    if (e.key === "Escape") closeDomainInput();
+                  }}
+                  placeholder="例如：反bl"
+                  className="w-full px-3 py-2 rounded-lg text-sm border border-gray-300 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-gray-400">
+                  释义（可选，帮助更精准地判断该领域）
+                </label>
+                <textarea
+                  value={noteInput}
+                  onChange={(e) => setNoteInput(e.target.value)}
+                  rows={3}
+                  placeholder="用一两句话说明这个领域具体指什么，避免被泛化误判"
+                  className="w-full px-3 py-2 rounded-lg text-sm border border-gray-300 focus:outline-none focus:ring-1 focus:ring-emerald-400 resize-none"
+                />
+              </div>
+            </div>
+            <div className="flex justify-between items-center">
+              {editingDomain ? (
+                <button
+                  onClick={() => setPendingDeleteDomain(editingDomain)}
+                  className="text-sm px-3 py-1.5 rounded-lg border border-red-300 text-red-500 hover:bg-red-50 transition"
+                >
+                  删除
+                </button>
+              ) : (
+                <span />
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={closeDomainInput}
+                  className="text-sm px-3 py-1.5 rounded-lg border text-gray-600 hover:bg-gray-50 transition"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={saveDomain}
+                  className="text-sm px-3 py-1.5 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition"
+                >
+                  保存
+                </button>
+              </div>
             </div>
           </div>
         </div>

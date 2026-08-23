@@ -499,7 +499,11 @@ async function findRecentByDomain(
   return out;
 }
 
-function buildSystemPrompt(domain: string, platforms: string[]) {
+function buildSystemPrompt(
+  domain: string,
+  platforms: string[],
+  userGlossary: Record<string, string> = {}
+) {
   const domainHint = domain
     ? `用户的创作领域是「${domain}」。`
     : `用户未指定创作领域，如果用户在消息中提到领域相关信息，请据此筛选。`;
@@ -512,9 +516,12 @@ function buildSystemPrompt(domain: string, platforms: string[]) {
   const rightExample = domainList.map((d) => `【${d}】`).join("");
   const wrongExample = `【${domainList.join("、")}】`;
 
-  // 针对含义不明确的领域词注入精确释义，避免模型臆测滥打标签
+  // 针对含义不明确的领域词注入精确释义，避免模型臆测滥打标签。
+  // 优先用用户在界面上为该领域填写的释义；没有再回退到内置 DOMAIN_GLOSSARY。
   const glossaryLines = domainList
     .map((d) => {
+      const userNote = (userGlossary[d] || "").trim();
+      if (userNote) return `- 「${d}」的准确含义：${userNote}`;
       const hit = DOMAIN_GLOSSARY.find((g) => g.test.test(d));
       return hit ? `- 「${d}」的准确含义：${hit.note}` : "";
     })
@@ -664,7 +671,7 @@ async function callLLM(
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages, domain, platforms } = await req.json();
+    const { messages, domain, platforms, glossary } = await req.json();
 
     if (!OPENAI_API_KEY) {
       return NextResponse.json({
@@ -675,7 +682,11 @@ export async function POST(req: NextRequest) {
 
     const systemMsg = {
       role: "system",
-      content: buildSystemPrompt(domain, platforms),
+      content: buildSystemPrompt(
+        domain,
+        platforms,
+        glossary && typeof glossary === "object" ? glossary : {}
+      ),
     };
 
     let conversationMessages = [systemMsg, ...messages];
