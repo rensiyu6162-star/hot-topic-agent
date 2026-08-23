@@ -457,21 +457,54 @@ const DOMAIN_GLOSSARY: { test: RegExp; note: string; queries?: string[] }[] = [
   },
 ];
 
-// 兜底发现：把领域词拆解成一组相关检索词（命中 glossary 用其 queries，如「反bl」→反耽美/耽改剧下架/抵制耽美…；
-// 否则退回领域词本身），逐个跑 SearXNG 聚合去重。
+// 关键词展开（通用）：任何领域——尤其是用户自定义领域——都用 LLM 把「领域名称 + 释义」
+// 拆解成一组"人们在真实标题里会用"的中文搜索词，用于近30天兜底检索。
+// 只填了名称就只基于名称展开；填了释义就结合释义展开。结果按 name|note 缓存，避免同一请求内重复调用。
+const kwCache = new Map<string, string[]>();
+async function expandDomainKeywords(name: string, note = ""): Promise<string[]> {
+  const key = `${name.trim()}|${note.trim()}`;
+  if (kwCache.has(key)) return kwCache.get(key)!;
+  const prompt = `你是中文搜索关键词扩展助手。用户的创作领域是「${name.trim()}」${
+    note.trim() ? `，其释义是：${note.trim()}` : ""
+  }。
+请把这个领域展开成 6-10 个"人们在真实新闻/文章标题里会实际使用"的中文搜索关键词，用于检索该领域近期的相关内容。
+要求：
+- 每个关键词是一个独立的短词或词组（以 1-6 个汉字为主），【不要】用空格把多个词拼在一起（搜索引擎会按 AND 处理，导致几乎搜不到）。
+- 覆盖该领域的近义说法、相关现象、典型事件类型。例如领域「反bl」可展开为：反耽美、耽改剧、耽美、腐文化、抵制耽美、反对耽改、耽美整改。
+- 只返回一个 JSON 字符串数组，不要任何解释或多余文字。例如：["反耽美","耽改剧","耽美"]`;
+  let arr: string[] = [];
+  try {
+    const res: string = await callLLM([{ role: "user", content: prompt }], false);
+    const m = res.match(/\[[\s\S]*\]/);
+    if (m) arr = JSON.parse(m[0]);
+  } catch {}
+  arr = (Array.isArray(arr) ? arr : [])
+    .filter((x) => typeof x === "string" && x.trim())
+    .map((x) => x.trim());
+  kwCache.set(key, arr);
+  return arr;
+}
+
+// 兜底发现：把领域词拆解成一组相关检索词（原始词 + 内置词表 + LLM 通用展开），逐个跑 SearXNG 聚合去重。
 // ⚠️ SearXNG 的 time_range 过滤很激进：很多引擎不返回日期，会被 time_range 直接过滤成 0 条——
 // 这正是"一个月都没有返回结果"的根因。所以这里【渐进放宽】：近一个月 → 近一年 → 不限时间，
 // 只要总量还不够就继续放宽，保证能拿到相关内容。
 async function findRecentByDomain(
   domain: string,
-  limit = 12
+  limit = 12,
+  note = ""
 ): Promise<{ title: string; url: string; source: string }[]> {
   const d = domain.trim();
   if (!d) return [];
   const hit = DOMAIN_GLOSSARY.find((g) => g.test.test(d));
-  // 原始领域词（如"反bl"）本身之前就能搜到很多结果，必须始终保留并优先检索，
-  // 再补上词表里的相关宽词，去重。绝不能像之前那样用一组多词短语【替换掉】原始词。
-  const queries = Array.from(new Set([d, ...(hit?.queries || [])]));
+  // 原始领域词（如"反bl"）本身之前就能搜到很多结果，必须始终保留并优先检索。
+  // 再补上：内置词表的相关宽词（若命中）+ LLM 基于名称/释义的通用展开。去重。
+  // 内置词表已充分覆盖且用户没填释义时，跳过 LLM 展开以省开销；否则一律做通用展开。
+  let expanded: string[] = [];
+  if (!hit || note.trim()) {
+    expanded = await expandDomainKeywords(d, note);
+  }
+  const queries = Array.from(new Set([d, ...(hit?.queries || []), ...expanded]));
 
   const collect = async (
     timeRange: "month" | "year" | ""
@@ -509,14 +542,15 @@ async function findRecentByDomain(
 }
 
 // 兜底安全网：模型有时嘴上说"该领域今日无热点"却【没真的调用】兜底工具，导致气泡框不出现。
-// 这里对每个"已锁定且命中内置小众词表"的领域（如「反bl」）主动补跑一次拆词检索，
-// 把结果并入 recentFallback，保证只要有相关内容，气泡框就一定会出现。
+// 这里对每个"已锁定、且属于小众/自定义领域"的领域主动补跑一次拆词检索，把结果并入 recentFallback，
+// 保证只要有相关内容气泡框就一定出现。触发范围：命中内置词表（如「反bl」）或用户填了释义的自定义领域。
 async function ensureNicheFallback(
   domain: string,
   current: {
     domain: string;
     items: { title: string; url: string; source: string }[];
-  } | null
+  } | null,
+  userGlossary: Record<string, string> = {}
 ) {
   const domainList = (domain || "")
     .split(/[、，,\/\s]+/)
@@ -524,10 +558,12 @@ async function ensureNicheFallback(
     .filter(Boolean);
   let fb = current;
   for (const d of domainList) {
+    const note = (userGlossary[d] || "").trim();
     const hit = DOMAIN_GLOSSARY.find((g) => g.test.test(d));
-    if (!hit) continue; // 只对内置小众词表里的领域主动兜底
+    // 只对内置小众词表、或用户自定义（填了释义）的领域主动兜底；默认宽领域交给模型自行判断。
+    if (!hit && !note) continue;
     if (fb && fb.domain.split("、").includes(d)) continue; // 模型已针对该领域补过
-    const items = await findRecentByDomain(d, 12);
+    const items = await findRecentByDomain(d, 12, note);
     if (items.length === 0) continue;
     if (!fb) fb = { domain: "", items: [] };
     const seen = new Set(fb.items.map((x) => x.url));
@@ -629,7 +665,8 @@ ${displayRule}
 async function executeTool(
   name: string,
   args: any,
-  domain: string
+  domain: string,
+  userGlossary: Record<string, string> = {}
 ): Promise<string> {
   switch (name) {
     case "fetch_hot_topics": {
@@ -672,7 +709,8 @@ ${JSON.stringify(args.topics, null, 2)}`;
       const d = (args.domain || domain || "").toString().trim();
       if (!d)
         return JSON.stringify({ domain: "", range: "近30天", realtime: false, items: [] });
-      const items = await findRecentByDomain(d, 12);
+      const note = (userGlossary[d] || "").trim();
+      const items = await findRecentByDomain(d, 12, note);
       return JSON.stringify(
         { domain: d, range: "近30天", realtime: false, items },
         null,
@@ -717,6 +755,8 @@ async function callLLM(
 export async function POST(req: NextRequest) {
   try {
     const { messages, domain, platforms, glossary } = await req.json();
+    const userGlossary: Record<string, string> =
+      glossary && typeof glossary === "object" ? glossary : {};
 
     if (!OPENAI_API_KEY) {
       return NextResponse.json({
@@ -727,11 +767,7 @@ export async function POST(req: NextRequest) {
 
     const systemMsg = {
       role: "system",
-      content: buildSystemPrompt(
-        domain,
-        platforms,
-        glossary && typeof glossary === "object" ? glossary : {}
-      ),
+      content: buildSystemPrompt(domain, platforms, userGlossary),
     };
 
     let conversationMessages = [systemMsg, ...messages];
@@ -757,7 +793,7 @@ export async function POST(req: NextRequest) {
       // If no tool calls, return the final text
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
         // 安全网：小众领域即使模型没调兜底工具，也主动补一次拆词检索
-        recentFallback = await ensureNicheFallback(domain, recentFallback);
+        recentFallback = await ensureNicheFallback(domain, recentFallback, userGlossary);
         return NextResponse.json({
           content: assistantMessage.content || "完成。",
           toolLogs,
@@ -777,7 +813,7 @@ export async function POST(req: NextRequest) {
 
         toolLogs.push(`调用 ${fnName}(${fnArgs.platform || fnArgs.topic || fnArgs.domain || ""})`);
 
-        const result = await executeTool(fnName, fnArgs, domain);
+        const result = await executeTool(fnName, fnArgs, domain, userGlossary);
 
         // 收集近30天兜底结果（可能针对多个小众领域被调用多次，合并去重）
         if (fnName === "search_recent_topics_by_domain") {
@@ -818,7 +854,7 @@ export async function POST(req: NextRequest) {
     const finalMsg = await callLLM(conversationMessages, false);
 
     // 安全网：小众领域即使模型没调兜底工具，也主动补一次拆词检索
-    recentFallback = await ensureNicheFallback(domain, recentFallback);
+    recentFallback = await ensureNicheFallback(domain, recentFallback, userGlossary);
 
     return NextResponse.json({
       content: finalMsg || "已完成处理。",
