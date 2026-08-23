@@ -1,7 +1,0 @@
-feat: 移除近30天兜底气泡框，改为直接拼进回复正文
-
-- route.ts: 新增 appendRecentFallback，将近30天兜底结果以"序号. 来源｜标题"格式
-  追加到最终回复末尾（含"今日无实时热点/近30天相关内容"说明），两个返回点统一调用，
-  不再返回 recentFallback 字段
-- 调整系统提示：模型只需一句说明，不再自行罗列近30天条目，避免与系统追加重复
-- page.tsx: 删除 RecentFallback 接口、recentBubble 状态、setRecentBubble 调用与气泡框 JSX
