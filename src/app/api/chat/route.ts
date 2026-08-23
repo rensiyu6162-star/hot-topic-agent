@@ -442,14 +442,17 @@ const DOMAIN_GLOSSARY: { test: RegExp; note: string; queries?: string[] }[] = [
   {
     test: /反\s*bl|反耽美|反\s*boys?['']?\s*love/i,
     note: "特指反对/批评「男男同性恋爱（BL / 耽美 / Boys' Love）」题材的内容，比如反对耽改剧、BL 小说、BL 同人、腐文化等。判定要极窄：只有当热点的核心话题就是在讨论 BL / 耽美这类题材本身（或明确反对这类题材）时才打这个标签。女性成长、女性权益、职场、婚恋、诈骗、社会新闻等，只要不是在直接讲 BL / 耽美题材，就【绝对不要】打【反bl】。更不要把「反bl」臆测成'反被规训 / 反凝视 / 反刻板印象'之类的宽泛含义去硬套到大量热点上。",
+    // ⚠️ SearXNG 把空格分隔的词按 AND 处理，多词短语（如"耽美 danmei 争议"）会过度收窄、几乎搜不到东西。
+    // 这里用【单个宽词】逐个检索，命中面更广；原始领域词（"反bl"）也会在 findRecentByDomain 里被优先检索。
     queries: [
-      "耽改剧 下架",
-      "耽美 整改",
-      "抵制 耽美",
-      "腐文化 争议",
-      "BL 影视 争议",
-      "反对 耽改",
-      "耽美 danmei 争议",
+      "反bl",
+      "反耽美",
+      "耽改剧",
+      "耽美",
+      "腐文化",
+      "抵制耽美",
+      "反对耽改",
+      "耽美整改",
     ],
   },
 ];
@@ -466,7 +469,9 @@ async function findRecentByDomain(
   const d = domain.trim();
   if (!d) return [];
   const hit = DOMAIN_GLOSSARY.find((g) => g.test.test(d));
-  const queries = hit?.queries?.length ? hit.queries : [d];
+  // 原始领域词（如"反bl"）本身之前就能搜到很多结果，必须始终保留并优先检索，
+  // 再补上词表里的相关宽词，去重。绝不能像之前那样用一组多词短语【替换掉】原始词。
+  const queries = Array.from(new Set([d, ...(hit?.queries || [])]));
 
   const collect = async (
     timeRange: "month" | "year" | ""
