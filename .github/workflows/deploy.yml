@@ -12,6 +12,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Strip .git before transfer
+        run: rm -rf .git
+
       - name: Copy code to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
