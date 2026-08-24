@@ -8,6 +8,7 @@ interface Message {
   toolLogs?: string[];
   emptyNote?: string;
   domains?: string[]; // 该条用户消息发送时锁定的领域（用于在气泡上直观显示本轮生效领域）
+  kind?: "script"; // 生成脚本产出的消息：按纯文本渲染，不当作热点条目解析出「查看详情」
 }
 
 interface DetailData {
@@ -112,8 +113,11 @@ export default function Home() {
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<number>(0);
   const [copied, setCopied] = useState(false);
-  // 每条热点的「查看详情」展开状态（key = 消息序号:行号）
-  const [details, setDetails] = useState<Record<string, DetailState>>({});
+  // 每条热点的「查看详情」展开状态，按会话隔离（外层 key = 会话 id，内层 key = 消息序号:行号）。
+  // 持久化到 localStorage：只要点开查看过，刷新后展开/收起（及生成脚本）按钮就一直常驻。
+  const [detailsBySession, setDetailsBySession] = useState<
+    Record<string, Record<string, DetailState>>
+  >({});
   // 消息多选删除：长按(移动端)/悬浮工具栏删除按钮(桌面端) 唤起编辑态，勾选后统一删除
   const [selectMode, setSelectMode] = useState(false);
   const [selectedMsgs, setSelectedMsgs] = useState<number[]>([]);
@@ -159,6 +163,101 @@ export default function Home() {
     );
   };
 
+  // 当前会话的「查看详情」展开状态，及只更新当前会话那一份的辅助函数
+  const details = detailsBySession[activeId] || {};
+  const updateDetails = (
+    fn: (prev: Record<string, DetailState>) => Record<string, DetailState>
+  ) =>
+    setDetailsBySession((p) => ({ ...p, [activeId]: fn(p[activeId] || {}) }));
+
+  // ===== 生成脚本弹窗 =====
+  type ScriptType = "口播稿" | "情景演绎" | "AI生视频";
+  // 非 null 时弹窗打开，携带目标热点的话题/平台/已抓取的详细报道（作为生成脚本的事实依据）
+  const [scriptModal, setScriptModal] = useState<
+    { topic: string; platform: string; report: string } | null
+  >(null);
+  const [scriptType, setScriptType] = useState<ScriptType>("口播稿");
+  const [scriptPlot, setScriptPlot] = useState(""); // 脚本(选填)
+  const [scriptEmbed, setScriptEmbed] = useState(""); // 希望植入的梗、台词或桥段
+  const [polishing, setPolishing] = useState(false); // 润色剧情进行中
+  const [scriptGenerating, setScriptGenerating] = useState(false); // 一键生成进行中
+
+  const openScriptModal = (topic: string, platform: string, report: string) => {
+    setScriptType("口播稿");
+    setScriptPlot("");
+    setScriptEmbed("");
+    setPolishing(false);
+    setScriptGenerating(false);
+    setScriptModal({ topic, platform, report });
+  };
+
+  // 润色剧情：把用户输入的剧情想法，结合热点事件与已抓取报道，润色成一段简略的对应题材脚本，回填到脚本框
+  const polishPlot = async () => {
+    if (!scriptModal || !scriptPlot.trim() || polishing) return;
+    setPolishing(true);
+    try {
+      const res = await fetch("/api/script", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "polish",
+          topic: scriptModal.topic,
+          platform: scriptModal.platform,
+          report: scriptModal.report,
+          type: scriptType,
+          plot: scriptPlot,
+        }),
+      });
+      const data = await res.json();
+      if (data?.script) setScriptPlot(String(data.script).trim());
+    } catch {
+    } finally {
+      setPolishing(false);
+    }
+  };
+
+  // 一键生成脚本：综合类型 + 脚本框内容 + 待植入元素 + 热点事件与报道，生成最终脚本并作为一条消息插入对话
+  const generateScript = async () => {
+    if (!scriptModal || scriptGenerating) return;
+    const { topic, platform, report } = scriptModal;
+    const type = scriptType;
+    setScriptGenerating(true);
+    try {
+      const res = await fetch("/api/script", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "generate",
+          topic,
+          platform,
+          report,
+          type,
+          script: scriptPlot,
+          embed: scriptEmbed,
+        }),
+      });
+      const data = await res.json();
+      const script = (data?.script && String(data.script).trim()) || "脚本生成失败，请稍后重试。";
+      setActiveMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          kind: "script",
+          content: `🎬 视频脚本（${type}）｜${topic}\n\n${script}`,
+        },
+      ]);
+      setScriptModal(null);
+    } catch {
+      setActiveMessages((prev) => [
+        ...prev,
+        { role: "assistant", kind: "script", content: "脚本生成失败，请稍后重试。" },
+      ]);
+      setScriptModal(null);
+    } finally {
+      setScriptGenerating(false);
+    }
+  };
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -192,6 +291,13 @@ export default function Home() {
 
       const savedCode = localStorage.getItem("syncCode");
       if (savedCode) setSyncCode(savedCode);
+
+      // 恢复「查看详情」展开状态：只要之前点开查看过，刷新后按钮就常驻
+      const savedDetails = localStorage.getItem("detailsBySession");
+      if (savedDetails) {
+        const parsed = JSON.parse(savedDetails);
+        if (parsed && typeof parsed === "object") setDetailsBySession(parsed);
+      }
 
       // 隐藏设备标识：没有就生成一个（复用同步码格式，满足服务端 code 校验）
       let dev = localStorage.getItem("deviceId");
@@ -253,6 +359,25 @@ export default function Home() {
       localStorage.setItem("activeSessionId", activeId);
     } catch {}
   }, [hydrated, sessions, activeId]);
+
+  // 持久化「查看详情」展开状态。只存已成功加载出详情的条目（剔除 loading/失败态），
+  // 保证刷新后按钮常驻且能立即展开，也不会把加载中/失败的半成品状态存进去。
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      const clean: Record<string, Record<string, DetailState>> = {};
+      for (const [sid, map] of Object.entries(detailsBySession)) {
+        const m: Record<string, DetailState> = {};
+        for (const [k, v] of Object.entries(map || {})) {
+          if (v?.data && !v.loading && !v.error) {
+            m[k] = { open: v.open, loading: false, data: v.data };
+          }
+        }
+        if (Object.keys(m).length) clean[sid] = m;
+      }
+      localStorage.setItem("detailsBySession", JSON.stringify(clean));
+    } catch {}
+  }, [hydrated, detailsBySession]);
 
   // ===== 跨设备同步 =====
   const buildPayload = () => ({
@@ -1043,7 +1168,7 @@ export default function Home() {
   const toggleDetail = async (key: string, topic: string, platform = "") => {
     const cur = details[key];
     if (cur && cur.data) {
-      setDetails((p) => ({ ...p, [key]: { ...cur, open: !cur.open } }));
+      updateDetails((p) => ({ ...p, [key]: { ...cur, open: !cur.open } }));
       return;
     }
     if (cur && cur.loading) return;
@@ -1052,7 +1177,7 @@ export default function Home() {
 
   // 实际拉取详情（首次点击与「重试」共用）：失败时置 error 标记，供 UI 显示重试按钮
   const loadDetail = async (key: string, topic: string, platform = "") => {
-    setDetails((p) => ({
+    updateDetails((p) => ({
       ...p,
       [key]: { open: true, loading: true, data: null },
     }));
@@ -1066,12 +1191,12 @@ export default function Home() {
       // 服务端 500 或返回"详情获取失败…"这类兜底文案，同样按失败处理，展示重试按钮
       const failed =
         !res.ok || /^详情获取失败/.test((data?.report || "").trim());
-      setDetails((p) => ({
+      updateDetails((p) => ({
         ...p,
         [key]: { open: true, loading: false, data, error: failed },
       }));
     } catch {
-      setDetails((p) => ({
+      updateDetails((p) => ({
         ...p,
         [key]: {
           open: true,
@@ -1121,7 +1246,7 @@ export default function Home() {
     if (selectedMsgs.length === 0) return;
     const del = new Set(selectedMsgs);
     setActiveMessages((prev) => prev.filter((_, idx) => !del.has(idx)));
-    setDetails({}); // 删除后序号会平移，清空详情缓存避免 key 错位
+    updateDetails(() => ({})); // 删除后序号会平移，清空本会话详情缓存避免 key 错位
     exitSelectMode();
   };
 
@@ -1196,6 +1321,17 @@ export default function Home() {
             >
               {st?.open ? "收起" : st ? "展开" : "查看详情"}
             </button>
+            {/* 查看过详情后，展开/收起按钮右侧常驻「生成脚本」入口 */}
+            {st?.data && (
+              <button
+                onClick={() =>
+                  openScriptModal(topic, platform, st.data?.report || "")
+                }
+                className="align-middle ml-2 whitespace-nowrap text-[11px] leading-none px-2 py-1 rounded-full border border-purple-300 text-purple-600 hover:bg-purple-50 transition"
+              >
+                生成脚本
+              </button>
+            )}
           </div>
           {st?.open && (
             <div className="mt-2 mb-2 rounded-xl bg-gray-50 border border-gray-200 p-3 text-xs text-gray-600 space-y-3">
@@ -1394,6 +1530,106 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* 生成脚本弹窗 */}
+      {scriptModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => !scriptGenerating && setScriptModal(null)}
+          />
+          <div className="relative z-10 w-full max-w-lg bg-white rounded-2xl shadow-xl p-5 space-y-4 max-h-[88vh] overflow-y-auto">
+            <div>
+              <div className="font-bold text-gray-800">生成脚本</div>
+              <p className="mt-1 text-xs text-gray-400 break-words">
+                热点事件：{scriptModal.topic}
+              </p>
+            </div>
+
+            {/* 脚本类型：三选一 */}
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-gray-700">脚本类型</label>
+              <div className="flex gap-2">
+                {(["口播稿", "情景演绎", "AI生视频"] as ScriptType[]).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setScriptType(t)}
+                    className={`flex-1 px-3 py-2 rounded-lg border text-sm transition ${
+                      scriptType === t
+                        ? "border-purple-400 bg-purple-50 text-purple-600 font-medium"
+                        : "border-gray-200 text-gray-600 hover:border-purple-300"
+                    }`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* SCRIPT_MODAL_REST */}
+
+            {/* 脚本（选填）+ 润色剧情 */}
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-gray-700">
+                脚本（选填）
+              </label>
+              <textarea
+                value={scriptPlot}
+                onChange={(e) => setScriptPlot(e.target.value)}
+                rows={5}
+                placeholder="支持自定义输入剧情，也可融入你的个人想法，点击生成剧情按钮，即可完成剧情润色。"
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 focus:border-purple-400 focus:outline-none resize-y"
+              />
+              <div className="flex justify-end">
+                <button
+                  onClick={polishPlot}
+                  disabled={!scriptPlot.trim() || polishing}
+                  className={`px-3 py-1.5 rounded-lg border text-xs transition ${
+                    !scriptPlot.trim() || polishing
+                      ? "border-gray-200 text-gray-300 cursor-not-allowed"
+                      : "border-purple-300 text-purple-600 hover:bg-purple-50"
+                  }`}
+                >
+                  {polishing ? "润色中…" : "润色剧情"}
+                </button>
+              </div>
+            </div>
+
+            {/* 希望植入的梗、台词或桥段 */}
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-gray-700">
+                希望植入的梗、台词或桥段
+              </label>
+              <textarea
+                value={scriptEmbed}
+                onChange={(e) => setScriptEmbed(e.target.value)}
+                rows={3}
+                placeholder="输入想要植入的梗、彩蛋、特定台词、名场面，AI会尽量将其融入生成的脚本中。"
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 focus:border-purple-400 focus:outline-none resize-y"
+              />
+            </div>
+
+            {/* 底部操作：取消 / 一键生成脚本 */}
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={() => !scriptGenerating && setScriptModal(null)}
+                disabled={scriptGenerating}
+                className="flex-1 px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-500 hover:bg-gray-50 transition disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={generateScript}
+                disabled={scriptGenerating}
+                className="flex-1 px-3 py-2 rounded-lg bg-purple-500 text-white text-sm font-medium hover:bg-purple-600 transition disabled:opacity-60"
+              >
+                {scriptGenerating ? "生成中…" : "一键生成脚本"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+
 
       {schedReplaceCandidate && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
@@ -2278,9 +2514,17 @@ export default function Home() {
                       </div>
                     )}
                     <div className={selectMode ? "pointer-events-none" : ""}>
-                      {msg.role === "assistant" && !isWelcome
-                        ? renderAssistantContent(msg.content, i)
-                        : msg.content}
+                      {msg.role === "assistant" && !isWelcome ? (
+                        msg.kind === "script" ? (
+                          <div className="whitespace-pre-wrap leading-relaxed">
+                            {cleanMarkdown(msg.content)}
+                          </div>
+                        ) : (
+                          renderAssistantContent(msg.content, i)
+                        )
+                      ) : (
+                        msg.content
+                      )}
                     </div>
                   </div>
                   {/* 多领域·未搜到领域的独立气泡：与回答同侧(左)、堆叠在下方，互不重叠 */}
