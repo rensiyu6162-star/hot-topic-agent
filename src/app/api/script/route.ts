@@ -41,11 +41,11 @@ async function callLLM(prompt: string): Promise<string> {
 // 各脚本题材的形式要求，让生成结果贴合对应形态且保持简短
 const TYPE_GUIDE: Record<string, string> = {
   口播稿:
-    "形式为「口播稿」：一段可直接照读的口播文案，口语化、有钩子开头和收尾引导，控制在 150 字以内。",
+    "形式为「口播稿」：一段可直接照读的口播文案，口语化、有钩子开头和收尾引导。",
   情景演绎:
-    "形式为「情景演绎」：给出简短的分镜/对白脚本，标注场景与人物台词，3-5 个镜头即可，整体简短。",
+    "形式为「情景演绎」：给出分镜/对白脚本，标注场景与人物台词。",
   AI生视频:
-    "形式为「AI生视频」：按镜头给出简短的画面描述（可含运镜、字幕提示），便于用 AI 生视频工具逐镜生成，3-5 个镜头，整体简短。",
+    "形式为「AI生视频」：按镜头给出画面描述（可含运镜、字幕提示），便于用 AI 生视频工具逐镜生成。",
 };
 
 export async function POST(req: NextRequest) {
@@ -62,11 +62,18 @@ export async function POST(req: NextRequest) {
     const platform: string = (body?.platform || "").toString().trim();
     const report: string = (body?.report || "").toString().trim();
     const type: string = (body?.type || "口播稿").toString().trim();
+    const duration: string = (body?.duration || "").toString().trim();
+    const wordRange: string = (body?.wordRange || "").toString().trim();
     if (!topic) {
       return NextResponse.json({ script: "", error: "缺少热点信息。" }, { status: 400 });
     }
 
     const typeGuide = TYPE_GUIDE[type] || TYPE_GUIDE["口播稿"];
+    // 时长档位存在时，长度以该时长/字数为准（覆盖题材要求里的固定字数），否则保持简短
+    const lengthGuide =
+      duration && wordRange
+        ? `目标视频时长约${duration}，脚本参考字数 ${wordRange}（口播稿即口播文字量；分镜类脚本请让全部台词/旁白/画面描述的文字总量贴近该区间）。请贴合该时长与字数，不要明显偏短或偏长。`
+        : "篇幅务必简短精炼，不要冗长。";
     const from = platform ? `（来自${platform}热榜）` : "";
     const groundBlock = report
       ? `该热点事件网上相关的高热度报道如下，请以此为事实依据，不要编造报道之外的事实：\n${report}`
@@ -78,7 +85,7 @@ export async function POST(req: NextRequest) {
       if (!plot) {
         return NextResponse.json({ script: "", error: "请先输入剧情内容。" }, { status: 400 });
       }
-      prompt = `你是资深短视频编导。请把用户的剧情想法，结合下面的热点事件与相关报道，润色成一个【简略】的对应题材脚本，不要太长。
+      prompt = `你是资深短视频编导。请把用户的剧情想法，结合下面的热点事件与相关报道，润色成一个对应题材的脚本。
 热点事件：「${topic}」${from}
 ${groundBlock}
 
@@ -87,14 +94,14 @@ ${plot}
 
 要求：
 1. ${typeGuide}
-2. 紧扣上面的热点事件，让剧情与该事件真正相关；
-3. 保留用户剧情想法里的核心创意，只做润色与结构化，不要跑题；
-4. 篇幅务必简短精炼，不要冗长；
+2. ${lengthGuide}
+3. 紧扣上面的热点事件，让剧情与该事件真正相关；
+4. 保留用户剧情想法里的核心创意，只做润色与结构化，不要跑题；
 5. 直接输出脚本正文，不要任何解释、前言、标题或"以下是"之类的话。`;
     } else {
       const script: string = (body?.script || "").toString().trim();
       const embed: string = (body?.embed || "").toString().trim();
-      prompt = `你是资深短视频编导。请结合下面的热点事件与相关报道，生成一个【简略】的脚本，不要太长。
+      prompt = `你是资深短视频编导。请结合下面的热点事件与相关报道，生成一个对应题材的脚本。
 热点事件：「${topic}」${from}
 ${groundBlock}
 ${script ? `\n参考/已有脚本内容（请在此基础上完善，保留其核心创意）：\n${script}` : ""}
@@ -102,8 +109,8 @@ ${embed ? `\n请尽量自然地把以下用户希望植入的梗、彩蛋、特�
 
 要求：
 1. ${typeGuide}
-2. 紧扣上面的热点事件；
-3. 篇幅务必简短精炼，不要冗长；
+2. ${lengthGuide}
+3. 紧扣上面的热点事件；
 4. 直接输出脚本正文，不要任何解释、前言、标题或"以下是"之类的话。`;
     }
 

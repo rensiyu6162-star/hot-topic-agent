@@ -172,6 +172,19 @@ export default function Home() {
 
   // ===== 生成脚本弹窗 =====
   type ScriptType = "口播稿" | "情景演绎" | "AI生视频";
+  // 脚本时长离散档位：30秒起、30秒步长、至5分钟；每档附带口播参考字数
+  const DURATION_STEPS = [
+    { label: "30秒", words: "90-110字" },
+    { label: "1分钟", words: "180-220字" },
+    { label: "1分30秒", words: "270-330字" },
+    { label: "2分钟", words: "360-440字" },
+    { label: "2分30秒", words: "450-550字" },
+    { label: "3分钟", words: "540-660字" },
+    { label: "3分30秒", words: "630-770字" },
+    { label: "4分钟", words: "720-880字" },
+    { label: "4分30秒", words: "810-990字" },
+    { label: "5分钟", words: "900-1100字" },
+  ];
   // 非 null 时弹窗打开，携带目标热点的话题/平台/已抓取的详细报道（作为生成脚本的事实依据）
   const [scriptModal, setScriptModal] = useState<
     { topic: string; platform: string; report: string } | null
@@ -181,6 +194,7 @@ export default function Home() {
   const [scriptEmbed, setScriptEmbed] = useState(""); // 希望植入的梗、台词或桥段
   const [polishing, setPolishing] = useState(false); // 润色剧情进行中
   const [scriptGenerating, setScriptGenerating] = useState(false); // 一键生成进行中
+  const [durationIdx, setDurationIdx] = useState(2); // 脚本时长档位，默认 1分30秒（index 2）
 
   const openScriptModal = (topic: string, platform: string, report: string) => {
     setScriptType("口播稿");
@@ -188,6 +202,7 @@ export default function Home() {
     setScriptEmbed("");
     setPolishing(false);
     setScriptGenerating(false);
+    setDurationIdx(2);
     setScriptModal({ topic, platform, report });
   };
 
@@ -206,6 +221,8 @@ export default function Home() {
           report: scriptModal.report,
           type: scriptType,
           plot: scriptPlot,
+          duration: DURATION_STEPS[durationIdx].label,
+          wordRange: DURATION_STEPS[durationIdx].words,
         }),
       });
       const data = await res.json();
@@ -234,6 +251,8 @@ export default function Home() {
           type,
           script: scriptPlot,
           embed: scriptEmbed,
+          duration: DURATION_STEPS[durationIdx].label,
+          wordRange: DURATION_STEPS[durationIdx].words,
         }),
       });
       const data = await res.json();
@@ -1563,6 +1582,31 @@ export default function Home() {
                     {t}
                   </button>
                 ))}
+              </div>
+            </div>
+            {/* 脚本时长：离散滑块（30秒步长，30秒~5分钟），实时展示时长+参考字数 */}
+            <div className="space-y-2">
+              <div className="flex items-baseline justify-between">
+                <label className="text-sm font-medium text-gray-700">脚本时长</label>
+                <span className="text-sm font-medium text-purple-600">
+                  {DURATION_STEPS[durationIdx].label}
+                  <span className="ml-1 text-xs text-gray-400">
+                    （参考字数 {DURATION_STEPS[durationIdx].words}）
+                  </span>
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={DURATION_STEPS.length - 1}
+                step={1}
+                value={durationIdx}
+                onChange={(e) => setDurationIdx(Number(e.target.value))}
+                className="w-full accent-purple-500 cursor-pointer"
+              />
+              <div className="flex justify-between text-[10px] text-gray-300">
+                <span>30秒</span>
+                <span>5分钟</span>
               </div>
             </div>
             {/* SCRIPT_MODAL_REST */}
