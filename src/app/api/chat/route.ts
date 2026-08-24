@@ -518,6 +518,44 @@ ${list}`;
   }
 }
 
+// 今日热点·确定性领域筛选的核心判断：对某个领域，用「领域名 + 释义/意图」逐条判断当日热点
+// 是否【在语义上真正属于/关联】该领域——理解含义与意图，而非字面撞词。这是修复用户反馈"两个
+// 极端"（释义窄的反bl却混进无关内容 / 释义完整的女性主义反而漏掉当日明显相关热点）的关键：
+// 不再走"沾边就算 / 宁可多留"与"务必按释义判断"自相矛盾的提示词，而由服务端用单一、干净、以
+// 释义为准的判据确定性执行。返回命中条目的下标集合；异常/无法判断时返回空集合（该领域按当日0命中
+// 处理，交由上层触发近30天兜底）。
+async function matchTodayTopics(
+  name: string,
+  meaning: string,
+  items: { platform: string; title: string }[]
+): Promise<Set<number>> {
+  if (items.length === 0) return new Set();
+  const list = items.map((it, i) => `${i}. ${it.title}`).join("\n");
+  const meaningLine = meaning.trim()
+    ? `领域「${name.trim()}」的准确含义是：${meaning.trim()}`
+    : `领域「${name.trim()}」（没有额外释义，请按这个领域名本身的常识含义，理解它真正关心的主题与意图）`;
+  const prompt = `${meaningLine}
+下面是今日各平台实时热榜的标题，请逐条判断它是否【在语义上真正属于/关联】这个领域。
+判断原则：
+- 先理解这个领域真正关心的主题和意图，再看每条热点是否【实质性地触及】这个主题（可以是具体事件、现象、争议，不必字面出现领域词）。
+- 【实质相关】就保留：例如领域含义是"女性权益/女性主义"，那么"女厕发现偷拍摄像头""职场性别歧视""女性遭遇不公"这类事件属于实质相关，应保留。
+- 【只是字面撞词但主题无关】的必须剔除：例如领域含义很窄（如"反对男男同性恋/耽美题材"），那么与该题材本身无关的女性成长、社会新闻、娱乐八卦即使字面沾一点边也要剔除。
+- 完全无关的剔除。拿不准这条是否真的触及这个主题时，倾向剔除。
+只返回一个 JSON 数组，元素是【相关】条目的序号（整数），例如 [0,3,5]；都不相关就返回 []。不要任何解释。
+
+${list}`;
+  try {
+    const res: string = await callLLM([{ role: "user", content: prompt }], false);
+    const m = res.match(/\[[\s\S]*\]/);
+    if (!m) return new Set();
+    return new Set<number>(
+      (JSON.parse(m[0]) as unknown[]).filter((n): n is number => Number.isInteger(n))
+    );
+  } catch {
+    return new Set();
+  }
+}
+
 // 兜底发现：把领域词拆解成一组相关检索词（原始词 + 内置词表 + LLM 通用展开），逐个跑 SearXNG 聚合去重。
 // ⚠️ SearXNG 的 time_range 过滤很激进：很多引擎不返回日期，会被 time_range 直接过滤成 0 条——
 // 这正是"一个月都没有返回结果"的根因。所以这里【渐进放宽】：近一个月 → 近一年 → 不限时间，
@@ -642,6 +680,67 @@ function renderAllPlatformsHot(
     blocks.join("\n\n") +
     `\n\n如需只看某个领域，在顶部「领域」里选择后再让我抓一次即可。`
   );
+}
+
+// 确定性渲染"已锁定领域"时的今日热点（根治 LLM 提示词自相矛盾导致的漏筛/滥筛）：
+// 用户反馈今日筛选出现两个极端——释义窄的「反bl」混进大量无关内容、释义完整的「女性主义」
+// 反而漏掉当日明显相关的热点（如"女厕疑似出现摄像头"）。根因是今日筛选完全由 LLM 提示词驱动，
+// 而提示词里"沾边就算/宁可多留"与"务必按释义判断、不要臆测"互相打架。这里【完全绕开模型正文】：
+// 对本轮抓到的当日全量热榜，逐个领域用其释义/意图做服务端语义相关性判断（matchTodayTopics），
+// 命中的才保留并打该领域标签；不相关的直接不进列表。输出格式与前端约定严格一致
+// （"序号. 平台｜标题 【标签1】【标签2】"），前端 renderAssistantContent 据此挂"查看详情"、渲染胶囊。
+// 某领域当日 0 命中时，其标签不会出现在正文里，交由 finalizeFallback 自动触发近30天兜底。
+async function renderDomainFilteredHot(
+  fetchedByPlatform: Map<string, any[]>,
+  domainList: string[],
+  userGlossary: Record<string, string>
+): Promise<string> {
+  // 摊平当日全部热点为 {platform, title}，保留平台内热度顺序、跨平台按抓取顺序拼接。
+  const all: { platform: string; title: string }[] = [];
+  for (const [platform, topics] of fetchedByPlatform) {
+    if (!Array.isArray(topics)) continue;
+    for (const t of topics) {
+      const title = (t?.title || t?.word || t?.name || "").toString().trim();
+      if (title) all.push({ platform, title });
+    }
+  }
+  if (all.length === 0) return "";
+
+  // 逐个领域并行判断命中（每个领域一次 LLM 判断，互不依赖），记录 下标 -> 命中的领域标签集合。
+  const results = await Promise.all(
+    domainList.map(async (d) => {
+      const meaning =
+        (userGlossary[d] || "").trim() ||
+        (DOMAIN_GLOSSARY.find((g) => g.test.test(d))?.note || "").trim();
+      const hit = await matchTodayTopics(d, meaning, all);
+      return { d, hit };
+    })
+  );
+  const tagsByIndex = new Map<number, string[]>();
+  for (const { d, hit } of results) {
+    for (const idx of hit) {
+      const arr = tagsByIndex.get(idx) || [];
+      arr.push(d);
+      tagsByIndex.set(idx, arr);
+    }
+  }
+
+  // 汇总输出：只输出至少命中一个领域的热点，保持原始顺序，顺序编号。
+  const lines: string[] = [];
+  let n = 1;
+  all.forEach((it, idx) => {
+    const tags = tagsByIndex.get(idx);
+    if (!tags || tags.length === 0) return;
+    const tagStr = tags.map((t) => `【${t}】`).join("");
+    lines.push(`${n}. ${it.platform}｜${it.title} ${tagStr}`);
+    n++;
+  });
+  // 全部领域今日都 0 命中 → 返回空正文，让上层用一句说明 + finalizeFallback 走近30天兜底。
+  if (lines.length === 0) return "";
+  const header = `已从各平台抓取今日实时热榜，并按所选领域（${domainList.join(
+    " / "
+  )}）筛选出以下相关热点（按各平台热度排列）：`;
+  return `${header}\n\n${lines.join("\n")}`;
 }
 
 // 确定性领域白名单强制（根治"切换领域后仍返回旧领域"）：
@@ -1078,8 +1177,21 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ content: deterministic, toolLogs });
           }
         }
+        // 已锁定领域且本轮抓了热榜 → 用确定性领域筛选替换模型正文（根治提示词自相矛盾导致的
+        // 漏筛/滥筛），再交给 finalizeFallback 判断哪些领域今日0命中、补近30天兜底。
+        let baseContent = assistantMessage.content || "完成。";
+        if (!noDomain && fetchedByPlatform.size > 0 && currentDomainList.length) {
+          const deterministic = await renderDomainFilteredHot(
+            fetchedByPlatform,
+            currentDomainList,
+            userGlossary
+          );
+          baseContent =
+            deterministic ||
+            `今日各平台实时热榜暂无与所选领域直接相关的热点。`;
+        }
         const fin = await finalizeFallback(
-          assistantMessage.content || "完成。",
+          baseContent,
           domain,
           recentFallback,
           userGlossary,
@@ -1185,6 +1297,26 @@ export async function POST(req: NextRequest) {
       if (deterministic) {
         return NextResponse.json({ content: deterministic, toolLogs });
       }
+    }
+    // 已锁定领域且已抓到热榜 → 同样用确定性领域筛选，达到迭代上限时也不让模型自行筛选。
+    if (!noDomain && fetchedByPlatform.size > 0 && currentDomainList.length) {
+      const deterministic = await renderDomainFilteredHot(
+        fetchedByPlatform,
+        currentDomainList,
+        userGlossary
+      );
+      const fin = await finalizeFallback(
+        deterministic || `今日各平台实时热榜暂无与所选领域直接相关的热点。`,
+        domain,
+        recentFallback,
+        userGlossary,
+        domainUniverse
+      );
+      return NextResponse.json({
+        content: fin.content,
+        emptyNote: fin.emptyNote,
+        toolLogs,
+      });
     }
     conversationMessages.push({
       role: "user",
