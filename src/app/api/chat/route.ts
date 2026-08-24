@@ -615,6 +615,35 @@ function appendRecentFallback(
   return (content || "").trimEnd() + block;
 }
 
+// 确定性渲染"未选领域"时的全量热榜（根治"没选领域却还按历史领域筛选"）：
+// 提示词/系统提醒都试过，模型仍会沿用对话历史里的旧领域锁定去过滤。既然未选领域时用户要的
+// 就是"每个榜前 N 条、不筛选"，那就【完全绕开模型正文】，直接用本轮 fetch_hot_topics 抓到的
+// 原始数据在服务端拼装，保证 100% 确定：抓了哪些平台就出哪些平台，各取热度前 N 条，不做任何领域过滤。
+function renderAllPlatformsHot(
+  fetchedByPlatform: Map<string, any[]>,
+  perPlatform = 20
+): string {
+  const blocks: string[] = [];
+  for (const [platform, topics] of fetchedByPlatform) {
+    if (!Array.isArray(topics) || topics.length === 0) continue;
+    const lines = topics
+      .slice(0, perPlatform)
+      .map((t: any, i: number) => {
+        const title = (t?.title || t?.word || t?.name || "").toString().trim();
+        return title ? `${i + 1}. ${title}` : "";
+      })
+      .filter(Boolean);
+    if (lines.length === 0) continue;
+    blocks.push(`🔥 ${platform} 今日热榜\n${lines.join("\n")}`);
+  }
+  if (blocks.length === 0) return "";
+  return (
+    `已从各平台抓取今日实时热榜（未指定领域，按各平台热度展示前 ${perPlatform} 条，不做领域筛选）：\n\n` +
+    blocks.join("\n\n") +
+    `\n\n如需只看某个领域，在顶部「领域」里选择后再让我抓一次即可。`
+  );
+}
+
 // 确定性领域白名单强制（根治"切换领域后仍返回旧领域"）：
 // 模型常沿用对话历史里的旧领域集合，把不在当前所选清单里的领域内容也列出来；提示词约束不可靠。
 // 这里在服务端对模型正文做确定性过滤（不依赖模型是否听话）：
@@ -1025,6 +1054,9 @@ export async function POST(req: NextRequest) {
       domain: string;
       items: { title: string; url: string; source: string }[];
     } | null = null;
+    // 未选领域时用于确定性渲染的原始抓取结果：平台名 → 该平台热点数组（保留抓取顺序）。
+    const fetchedByPlatform = new Map<string, any[]>();
+    const noDomain = !(typeof domain === "string" && domain.trim());
     const MAX_ITERATIONS = 5;
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -1039,6 +1071,13 @@ export async function POST(req: NextRequest) {
 
       // If no tool calls, return the final text
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+        // 未选领域且本轮确实抓了热榜 → 用确定性渲染替换模型正文，杜绝其按历史领域私自筛选。
+        if (noDomain && fetchedByPlatform.size > 0) {
+          const deterministic = renderAllPlatformsHot(fetchedByPlatform);
+          if (deterministic) {
+            return NextResponse.json({ content: deterministic, toolLogs });
+          }
+        }
         const fin = await finalizeFallback(
           assistantMessage.content || "完成。",
           domain,
@@ -1066,6 +1105,19 @@ export async function POST(req: NextRequest) {
         toolLogs.push(`调用 ${fnName}(${fnArgs.platform || fnArgs.topic || fnArgs.domain || ""})`);
 
         const result = await executeTool(fnName, fnArgs, domain, userGlossary);
+
+        // 捕获原始抓取结果，供"未选领域"时确定性渲染全量热榜（不依赖模型正文）。
+        if (fnName === "fetch_hot_topics") {
+          const platform = (fnArgs.platform || "").toString().trim();
+          if (platform) {
+            try {
+              const arr = JSON.parse(result);
+              if (Array.isArray(arr) && arr.length > 0) {
+                fetchedByPlatform.set(platform, arr);
+              }
+            } catch {}
+          }
+        }
 
         // 收集近30天兜底结果（可能针对多个小众领域被调用多次，合并去重）
         if (fnName === "search_recent_topics_by_domain") {
@@ -1127,6 +1179,13 @@ export async function POST(req: NextRequest) {
     }
 
     // If we hit max iterations, get a final summary
+    // 未选领域且已抓到热榜 → 同样走确定性渲染，避免达到迭代上限时模型再自行筛选。
+    if (noDomain && fetchedByPlatform.size > 0) {
+      const deterministic = renderAllPlatformsHot(fetchedByPlatform);
+      if (deterministic) {
+        return NextResponse.json({ content: deterministic, toolLogs });
+      }
+    }
     conversationMessages.push({
       role: "user",
       content: "请总结以上所有工具调用的结果，给出最终回复。",
