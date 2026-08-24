@@ -1004,6 +1004,19 @@ export async function POST(req: NextRequest) {
         .lastIndexOf("user");
       if (lastUserIdx >= 0) conversationMessages.splice(lastUserIdx, 0, reminder);
       else conversationMessages.push(reminder);
+    } else {
+      // 领域被清空时，对话历史里可能还留着上一轮“锁定某领域→逐条硬性过滤→带⭐相关度”的
+      // 回复。模型倾向于沿用自己历史里的做法，导致明明没选领域却还在按旧领域筛选。
+      // 在最后一条用户消息前插入一条最高时效性的提醒，强制本轮展示全部热点、不做任何领域筛选。
+      const reminder = {
+        role: "system",
+        content: `【重要·以此为准】用户当前【没有选择任何创作领域】，这【覆盖并作废】对话历史里出现过的任何领域锁定（例如之前锁过的「美食探店」「科技数码」或任何领域，现在全部失效）。本轮【必须】列出各平台抓到的【全部】热点，按各平台原始热度顺序展示，【禁止】按任何历史领域做筛选、剔除、重排或添加 ⭐ 相关度标记；每条热点后面只需用【】自由标注它所属的创作领域标签即可。历史消息里针对某个锁定领域生成的“锁定领域/逐条硬性过滤/筛选结果”一律【不得沿用】。`,
+      };
+      const lastUserIdx = conversationMessages
+        .map((m: any) => m.role)
+        .lastIndexOf("user");
+      if (lastUserIdx >= 0) conversationMessages.splice(lastUserIdx, 0, reminder);
+      else conversationMessages.push(reminder);
     }
     const toolLogs: string[] = [];
     // 近30天兜底：小众领域今日无热点时，search_recent_topics_by_domain 的结果收集到这里，
