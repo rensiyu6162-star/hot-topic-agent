@@ -1467,11 +1467,11 @@ export default function Home() {
                     disabled={!domainInput.trim() || meaningLoading}
                     className="shrink-0 text-sm px-3 py-2 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {meaningLoading ? "识别中…" : "确认"}
+                    {meaningLoading ? "识别中…" : "识别含义"}
                   </button>
                 </div>
                 <p className="text-[11px] text-gray-400">
-                  点「确认」让模型识别含义，给出可选释义（也可自己填写，释义可选）
+                  若词语本身含义清晰、无歧义，无需识别含义。
                 </p>
               </div>
 
@@ -1509,13 +1509,13 @@ export default function Home() {
 
               <div className="space-y-1">
                 <label className="text-xs text-gray-400">
-                  释义（可选，帮助更精准地判断该领域）
+                  释义（选填）
                 </label>
                 <textarea
                   value={noteInput}
                   onChange={(e) => setNoteInput(e.target.value)}
                   rows={3}
-                  placeholder="用一两句话说明这个领域具体指什么，避免被泛化误判"
+                  placeholder="可说明词语含义，避免被泛化。若词语本身清晰、无歧义则无需填写。"
                   className="w-full px-3 py-2 rounded-lg text-sm border border-gray-300 focus:outline-none focus:ring-1 focus:ring-emerald-400 resize-none"
                 />
               </div>
