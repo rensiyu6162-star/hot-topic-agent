@@ -1246,12 +1246,19 @@ export async function POST(req: NextRequest) {
             });
           }
         }
-        // 已锁定领域且本轮抓了热榜 → 用确定性领域筛选替换模型正文（根治提示词自相矛盾导致的
-        // 漏筛/滥筛），再交给 finalizeFallback 判断哪些领域今日0命中、补近30天兜底。
+        // 已锁定领域 → 无条件走确定性领域筛选替换模型正文（根治提示词自相矛盾导致的漏筛/滥筛）：
+        // 与"未选领域"同理，模型常常不抓新榜、而是沿用对话历史里的【旧领域】答复（如上一轮的
+        // 「灰灰男」结果）来污染本轮，导致带旧领域内容的兜底块（无【领域】标签，enforceDomainWhitelist
+        // 删不掉）泄漏。因此模型没抓就【服务端补抓】，再逐领域确定性筛选，彻底不信任模型正文。
         let baseContent = assistantMessage.content || "完成。";
-        if (!noDomain && fetchedByPlatform.size > 0 && currentDomainList.length) {
+        let domainFetched = fetchedByPlatform;
+        if (!noDomain && currentDomainList.length) {
+          domainFetched =
+            fetchedByPlatform.size > 0
+              ? fetchedByPlatform
+              : await fetchPlatformsHot(platforms);
           const deterministic = await renderDomainFilteredHot(
-            fetchedByPlatform,
+            domainFetched,
             currentDomainList,
             userGlossary
           );
@@ -1270,7 +1277,7 @@ export async function POST(req: NextRequest) {
           content: fin.content,
           emptyNote: fin.emptyNote,
           toolLogs,
-          topicUrls: buildTopicUrlMap(fetchedByPlatform),
+          topicUrls: buildTopicUrlMap(domainFetched),
         });
       }
 
@@ -1378,10 +1385,14 @@ export async function POST(req: NextRequest) {
         });
       }
     }
-    // 已锁定领域且已抓到热榜 → 同样用确定性领域筛选，达到迭代上限时也不让模型自行筛选。
-    if (!noDomain && fetchedByPlatform.size > 0 && currentDomainList.length) {
+    // 已锁定领域 → 同样无条件走确定性领域筛选（模型没抓就服务端补抓），达到迭代上限时也不让模型自行筛选。
+    if (!noDomain && currentDomainList.length) {
+      const domainFetched =
+        fetchedByPlatform.size > 0
+          ? fetchedByPlatform
+          : await fetchPlatformsHot(platforms);
       const deterministic = await renderDomainFilteredHot(
-        fetchedByPlatform,
+        domainFetched,
         currentDomainList,
         userGlossary
       );
@@ -1396,7 +1407,7 @@ export async function POST(req: NextRequest) {
         content: fin.content,
         emptyNote: fin.emptyNote,
         toolLogs,
-        topicUrls: buildTopicUrlMap(fetchedByPlatform),
+        topicUrls: buildTopicUrlMap(domainFetched),
       });
     }
     conversationMessages.push({
