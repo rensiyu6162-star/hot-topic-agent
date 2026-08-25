@@ -221,8 +221,6 @@ export default function Home() {
           report: scriptModal.report,
           type: scriptType,
           plot: scriptPlot,
-          duration: DURATION_STEPS[durationIdx].label,
-          wordRange: DURATION_STEPS[durationIdx].words,
         }),
       });
       const data = await res.json();
@@ -1614,7 +1612,7 @@ export default function Home() {
             {/* 脚本（选填）+ 润色剧情 */}
             <div className="space-y-1.5">
               <label className="text-sm font-medium text-gray-700">
-                脚本（选填）
+                剧情（选填）
               </label>
               <textarea
                 value={scriptPlot}
