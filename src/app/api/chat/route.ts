@@ -698,6 +698,33 @@ function renderAllPlatformsHot(
   );
 }
 
+// 未选领域时的【确定性兜底抓取】：不依赖模型是否调用 fetch_hot_topics。
+// 模型有时不抓新榜，而是直接用对话历史里的旧领域回复（甚至调 search_recent_topics_by_domain
+// 拉旧领域的近30天内容），导致 renderAllPlatformsHot 因 fetchedByPlatform 为空而被绕过——
+// 这就是"没选领域却按旧领域乱筛/漏垃圾"的根因。这里在服务端按用户当前选中的平台直接抓，
+// 保证"没选领域 → 出各平台前20条"这条铁律 100% 生效，与模型是否听话无关。
+async function fetchPlatformsHot(
+  platforms: string[]
+): Promise<Map<string, any[]>> {
+  const map = new Map<string, any[]>();
+  const list =
+    Array.isArray(platforms) && platforms.length
+      ? platforms
+      : Object.keys(PLATFORM_FETCHERS);
+  await Promise.all(
+    list.map(async (p) => {
+      const name = (p || "").toString().trim();
+      const fetcher = PLATFORM_FETCHERS[name];
+      if (!fetcher) return;
+      try {
+        const arr = await fetcher();
+        if (Array.isArray(arr) && arr.length > 0) map.set(name, arr);
+      } catch {}
+    })
+  );
+  return map;
+}
+
 // 确定性渲染"已锁定领域"时的今日热点（根治 LLM 提示词自相矛盾导致的漏筛/滥筛）：
 // 用户反馈今日筛选出现两个极端——释义窄的「反bl」混进大量无关内容、释义完整的「女性主义」
 // 反而漏掉当日明显相关的热点（如"女厕疑似出现摄像头"）。根因是今日筛选完全由 LLM 提示词驱动，
@@ -852,7 +879,7 @@ async function finalizeFallback(
   const stripped = domainList.length
     ? enforceDomainWhitelist(stripped0, domainList, allDomains)
     : stripped0;
-  let fb = recentFallback;
+  let fb = domainList.length ? recentFallback : null;
   // 记录"今日无热点、且近30天也没搜到"的领域，避免模型承诺了"以下为近30天内容"却什么都没有。
   const emptyDomains: string[] = [];
 
@@ -1186,9 +1213,13 @@ export async function POST(req: NextRequest) {
 
       // If no tool calls, return the final text
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
-        // 未选领域且本轮确实抓了热榜 → 用确定性渲染替换模型正文，杜绝其按历史领域私自筛选。
-        if (noDomain && fetchedByPlatform.size > 0) {
-          const deterministic = renderAllPlatformsHot(fetchedByPlatform);
+        // 未选领域 → 无条件走确定性全量热榜：模型没抓就服务端补抓，杜绝其按历史领域私自筛选。
+        if (noDomain) {
+          const fbp =
+            fetchedByPlatform.size > 0
+              ? fetchedByPlatform
+              : await fetchPlatformsHot(platforms);
+          const deterministic = renderAllPlatformsHot(fbp);
           if (deterministic) {
             return NextResponse.json({ content: deterministic, toolLogs });
           }
@@ -1248,7 +1279,9 @@ export async function POST(req: NextRequest) {
         }
 
         // 收集近30天兜底结果（可能针对多个小众领域被调用多次，合并去重）
-        if (fnName === "search_recent_topics_by_domain") {
+        // 未选领域时【绝不收集】：模型常用对话历史里的旧领域（如已删除的「情感变现实操」）
+        // 去调此工具，其结果无领域标签，enforceDomainWhitelist 删不掉，会以垃圾兜底形式泄漏给用户。
+        if (!noDomain && fnName === "search_recent_topics_by_domain") {
           try {
             const parsed = JSON.parse(result);
             const dm = (parsed.domain || "").toString().trim();
@@ -1307,9 +1340,13 @@ export async function POST(req: NextRequest) {
     }
 
     // If we hit max iterations, get a final summary
-    // 未选领域且已抓到热榜 → 同样走确定性渲染，避免达到迭代上限时模型再自行筛选。
-    if (noDomain && fetchedByPlatform.size > 0) {
-      const deterministic = renderAllPlatformsHot(fetchedByPlatform);
+    // 未选领域 → 同样无条件走确定性全量热榜（模型没抓就服务端补抓），达到迭代上限时也不让模型自行筛选。
+    if (noDomain) {
+      const fbp =
+        fetchedByPlatform.size > 0
+          ? fetchedByPlatform
+          : await fetchPlatformsHot(platforms);
+      const deterministic = renderAllPlatformsHot(fbp);
       if (deterministic) {
         return NextResponse.json({ content: deterministic, toolLogs });
       }
