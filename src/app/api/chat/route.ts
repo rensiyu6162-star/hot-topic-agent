@@ -37,6 +37,19 @@ function hostLabel(url: string): string {
 
 // 近30天搜索式发现：某锁定领域今日各平台实时热榜筛选后无相关热点时，
 // 用 SearXNG（time_range=month）检索该领域近一个月内的相关内容作为兜底。
+// 成人/SEO 垃圾站兜底黑名单：无释义的模糊领域今日无热点时，SearXNG 常把这类
+// 内容农场/成人资源站顶上来（标题多为"免费成人视频/在线观看/无码/番号入口"等）。
+// 相关性过滤只在有精确释义时才跑，兜不住它们，所以在检索源头按【标题关键词】直接丢弃。
+const JUNK_TITLE_RE =
+  /成人|在线观看|无码|高清资源|免费观看|性爱|裸体|色情|情色|番号|做爱|三级片|自慰|一区二区|入口18|漫画网址|完整版在线|免费下载|磁力|种子下载|av在线|18\+/i;
+
+function isJunkResult(title: string, url: string): boolean {
+  if (JUNK_TITLE_RE.test(title)) return true;
+  // 标题里被 ❌/✖ 之类符号打码的（前端截图里的 m.blog.* 垃圾站特征），一律视为垃圾
+  if (/[✖❌⚠]{1,}/.test(title) && /blog\./i.test(url)) return true;
+  return false;
+}
+
 async function searxRecentSearch(
   query: string,
   limit = 12,
@@ -44,9 +57,10 @@ async function searxRecentSearch(
 ): Promise<{ title: string; url: string; source: string }[]> {
   if (!SEARXNG_URL) return [];
   const tr = timeRange ? `&time_range=${timeRange}` : "";
+  // safesearch=1（中等）：过滤明显成人内容，又不至于像 2 那样误伤正常检索。
   const u =
     `${SEARXNG_URL}/search?q=${encodeURIComponent(query)}` +
-    `&format=json&language=zh-CN&safesearch=0${tr}&categories=general`;
+    `&format=json&language=zh-CN&safesearch=1${tr}&categories=general`;
   const res = await fetchWithTimeout(
     u,
     {
@@ -74,6 +88,8 @@ async function searxRecentSearch(
       )
     )
       continue;
+    // 跳过成人/SEO 垃圾内容农场（模糊领域无释义时最容易被顶上来）
+    if (isJunkResult(title, url)) continue;
     seen.add(url);
     out.push({ title, url, source: hostLabel(url) });
     if (out.length >= limit) break;
