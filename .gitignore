@@ -16,3 +16,6 @@ tsconfig.tsbuildinfo
 .vscode
 .idea
 *.sw?
+
+# Local commit message scratch file
+.git-commit-msg.txt
