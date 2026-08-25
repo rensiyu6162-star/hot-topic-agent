@@ -118,6 +118,9 @@ export default function Home() {
   const [detailsBySession, setDetailsBySession] = useState<
     Record<string, Record<string, DetailState>>
   >({});
+  // 「热点标题 → 原文链接」映射，跨多次回复累积并持久化。点「查看详情」时把这条热点的原报道
+  // url 一并发给 /api/detail，让详情接口把主报道无条件置顶为核心来源。
+  const [topicUrlMap, setTopicUrlMap] = useState<Record<string, string>>({});
   // 消息多选删除：长按(移动端)/悬浮工具栏删除按钮(桌面端) 唤起编辑态，勾选后统一删除
   const [selectMode, setSelectMode] = useState(false);
   const [selectedMsgs, setSelectedMsgs] = useState<number[]>([]);
@@ -316,6 +319,13 @@ export default function Home() {
         if (parsed && typeof parsed === "object") setDetailsBySession(parsed);
       }
 
+      // 恢复「标题 → 原文链接」映射，保证刷新后点详情仍能把主报道置顶为核心来源
+      const savedTopicUrls = localStorage.getItem("topicUrlMap");
+      if (savedTopicUrls) {
+        const parsed = JSON.parse(savedTopicUrls);
+        if (parsed && typeof parsed === "object") setTopicUrlMap(parsed);
+      }
+
       // 隐藏设备标识：没有就生成一个（复用同步码格式，满足服务端 code 校验）
       let dev = localStorage.getItem("deviceId");
       if (!dev) {
@@ -395,6 +405,14 @@ export default function Home() {
       localStorage.setItem("detailsBySession", JSON.stringify(clean));
     } catch {}
   }, [hydrated, detailsBySession]);
+
+  // 持久化「标题 → 原文链接」映射
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem("topicUrlMap", JSON.stringify(topicUrlMap));
+    } catch {}
+  }, [hydrated, topicUrlMap]);
 
   // ===== 跨设备同步 =====
   const buildPayload = () => ({
@@ -991,6 +1009,10 @@ export default function Home() {
         }),
       });
       const data = await res.json();
+      // 累积本轮返回的「标题 → 原文链接」映射，供后续点详情时置顶主报道为核心来源
+      if (data.topicUrls && typeof data.topicUrls === "object") {
+        setTopicUrlMap((prev) => ({ ...prev, ...data.topicUrls }));
+      }
       setActiveMessages((prev) => [
         ...prev,
         {
@@ -1182,18 +1204,28 @@ export default function Home() {
   };
 
   // 点击「查看详情」：首次拉取详情并展开，之后仅切换展开/收起（失败态也可正常展开收起，重试走独立按钮）
-  const toggleDetail = async (key: string, topic: string, platform = "") => {
+  const toggleDetail = async (
+    key: string,
+    topic: string,
+    platform = "",
+    url = ""
+  ) => {
     const cur = details[key];
     if (cur && cur.data) {
       updateDetails((p) => ({ ...p, [key]: { ...cur, open: !cur.open } }));
       return;
     }
     if (cur && cur.loading) return;
-    await loadDetail(key, topic, platform);
+    await loadDetail(key, topic, platform, url);
   };
 
   // 实际拉取详情（首次点击与「重试」共用）：失败时置 error 标记，供 UI 显示重试按钮
-  const loadDetail = async (key: string, topic: string, platform = "") => {
+  const loadDetail = async (
+    key: string,
+    topic: string,
+    platform = "",
+    url = ""
+  ) => {
     updateDetails((p) => ({
       ...p,
       [key]: { open: true, loading: true, data: null },
@@ -1202,7 +1234,7 @@ export default function Home() {
       const res = await fetch("/api/detail", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, platform }),
+        body: JSON.stringify({ topic, platform, url }),
       });
       const data = (await res.json()) as DetailData;
       // 服务端 500 或返回"详情获取失败…"这类兜底文案，同样按失败处理，展示重试按钮
@@ -1322,6 +1354,7 @@ export default function Home() {
       }
       const topic = extractTopic(line);
       const platform = extractPlatform(line);
+      const url = topicUrlMap[topic] || "";
       const key = `${msgIndex}:${li}`;
       const st = details[key];
       return (
@@ -1329,7 +1362,7 @@ export default function Home() {
           <div className="whitespace-pre-wrap">
             {renderLineWithTags(cleanMarkdown(line), key)}
             <button
-              onClick={() => toggleDetail(key, topic, platform)}
+              onClick={() => toggleDetail(key, topic, platform, url)}
               className={`align-middle ml-2 whitespace-nowrap text-[11px] leading-none px-2 py-1 rounded-full border transition ${
                 st
                   ? "opacity-100 border-emerald-300 text-emerald-600 hover:bg-emerald-50"
@@ -1360,7 +1393,7 @@ export default function Home() {
                     {cleanMarkdown(st.data?.report || "详情获取失败，请稍后重试。")}
                   </span>
                   <button
-                    onClick={() => loadDetail(key, topic, platform)}
+                    onClick={() => loadDetail(key, topic, platform, url)}
                     className="whitespace-nowrap text-[11px] leading-none px-2 py-1 rounded-full border border-indigo-300 text-indigo-500 hover:bg-indigo-50 transition"
                   >
                     ↻ 刷新重试

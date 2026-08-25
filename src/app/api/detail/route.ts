@@ -187,10 +187,16 @@ function rankLoose(lists: SearchHit[][], topic: string, limit: number): Link[] {
 
 export async function POST(req: NextRequest) {
   try {
-    const { topic, platform } = await req.json();
+    const { topic, platform, url } = await req.json();
     if (!topic || typeof topic !== "string") {
       return NextResponse.json({ report: "缺少话题信息。", sites: [], videos: [] });
     }
+    // 这条热点自身的原文链接（从热榜一路透传下来）。若合法，则无条件作为「核心来源」：
+    // 既置顶到参考网站/视频，也作为报道取材的第一篇，解决"主报道没出现在参考文献里"的问题。
+    const originUrl =
+      typeof url === "string" && /^https?:\/\//.test(url.trim())
+        ? url.trim()
+        : "";
     const core = cleanTopic(topic);
     const q = encodeURIComponent(core);
 
@@ -237,8 +243,35 @@ export async function POST(req: NextRequest) {
     const groundHits = coreLinks
       .map((l) => byUrl.get(l.url))
       .filter((h): h is SearchHit => !!h);
+
+    // 原报道链接：无条件纳入核心来源。置顶为报道取材的第一篇，并保证出现在参考网站/视频里。
+    const originIsVideo = originUrl ? isVideoUrl(originUrl) : false;
+    if (originUrl) {
+      coreUrls.add(originUrl);
+      // 作为第一篇取材资料（标题用热点主名称，SearXNG 可能已抓到同链接摘要则复用其正文）
+      const existingHit = byUrl.get(originUrl);
+      groundHits.unshift(
+        existingHit || { title: topic, url: originUrl, content: "" }
+      );
+    }
+
     sites = sites.map((l) => (coreUrls.has(l.url) ? { ...l, core: true } : l));
     videos = videos.map((l) => (coreUrls.has(l.url) ? { ...l, core: true } : l));
+
+    // 把原报道置顶到对应列表（去掉已存在的同链接项，再 unshift 到最前，标 core:true）。
+    if (originUrl) {
+      const originLink: Link = {
+        title: topic,
+        url: originUrl,
+        source: sourceOf(originUrl) || (platform || "").toString().trim(),
+        core: true,
+      };
+      if (originIsVideo) {
+        videos = [originLink, ...videos.filter((l) => l.url !== originUrl)];
+      } else {
+        sites = [originLink, ...sites.filter((l) => l.url !== originUrl)];
+      }
+    }
 
     // 报道取材：不局限于「核心来源」那 1-3 条，而是尽量多汇集权威来源交叉核对。
     // 从全部文章结果里剔除百科/搜索页与视频，按 (相关性 + 权威加权) 排序取前 8 条，

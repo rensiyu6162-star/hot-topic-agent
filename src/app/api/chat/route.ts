@@ -725,6 +725,24 @@ async function fetchPlatformsHot(
   return map;
 }
 
+// 构建「热点标题 → 原文链接」映射，供前端点「查看详情」时把这条热点的原报道 url 一并发给
+// /api/detail，让详情接口能把这条主报道无条件置顶为核心来源。key 用与渲染完全一致的标题
+// （t?.title || t?.word || t?.name 去空白），保证前端 extractTopic 拿到的标题能命中。
+function buildTopicUrlMap(
+  fetchedByPlatform: Map<string, any[]>
+): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const [, topics] of fetchedByPlatform) {
+    if (!Array.isArray(topics)) continue;
+    for (const t of topics) {
+      const title = (t?.title || t?.word || t?.name || "").toString().trim();
+      const url = (t?.url || t?.link || "").toString().trim();
+      if (title && url && !map[title]) map[title] = url;
+    }
+  }
+  return map;
+}
+
 // 确定性渲染"已锁定领域"时的今日热点（根治 LLM 提示词自相矛盾导致的漏筛/滥筛）：
 // 用户反馈今日筛选出现两个极端——释义窄的「反bl」混进大量无关内容、释义完整的「女性主义」
 // 反而漏掉当日明显相关的热点（如"女厕疑似出现摄像头"）。根因是今日筛选完全由 LLM 提示词驱动，
@@ -1221,7 +1239,11 @@ export async function POST(req: NextRequest) {
               : await fetchPlatformsHot(platforms);
           const deterministic = renderAllPlatformsHot(fbp);
           if (deterministic) {
-            return NextResponse.json({ content: deterministic, toolLogs });
+            return NextResponse.json({
+              content: deterministic,
+              toolLogs,
+              topicUrls: buildTopicUrlMap(fbp),
+            });
           }
         }
         // 已锁定领域且本轮抓了热榜 → 用确定性领域筛选替换模型正文（根治提示词自相矛盾导致的
@@ -1248,6 +1270,7 @@ export async function POST(req: NextRequest) {
           content: fin.content,
           emptyNote: fin.emptyNote,
           toolLogs,
+          topicUrls: buildTopicUrlMap(fetchedByPlatform),
         });
       }
 
@@ -1348,7 +1371,11 @@ export async function POST(req: NextRequest) {
           : await fetchPlatformsHot(platforms);
       const deterministic = renderAllPlatformsHot(fbp);
       if (deterministic) {
-        return NextResponse.json({ content: deterministic, toolLogs });
+        return NextResponse.json({
+          content: deterministic,
+          toolLogs,
+          topicUrls: buildTopicUrlMap(fbp),
+        });
       }
     }
     // 已锁定领域且已抓到热榜 → 同样用确定性领域筛选，达到迭代上限时也不让模型自行筛选。
@@ -1369,6 +1396,7 @@ export async function POST(req: NextRequest) {
         content: fin.content,
         emptyNote: fin.emptyNote,
         toolLogs,
+        topicUrls: buildTopicUrlMap(fetchedByPlatform),
       });
     }
     conversationMessages.push({
@@ -1388,6 +1416,7 @@ export async function POST(req: NextRequest) {
       content: fin.content,
       emptyNote: fin.emptyNote,
       toolLogs,
+      topicUrls: buildTopicUrlMap(fetchedByPlatform),
     });
   } catch (e: any) {
     return NextResponse.json(
