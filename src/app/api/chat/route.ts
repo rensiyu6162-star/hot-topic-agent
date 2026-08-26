@@ -669,30 +669,94 @@ function appendRecentFallback(
   return (content || "").trimEnd() + block;
 }
 
+// 未选领域时给热点打「分类小标签」用的默认分类集合（需与前端 page.tsx 的 DOMAINS 保持一致）。
+// 未选领域时不做筛选、全部展示，只按这组通用分类给每条热点挂标签，故用固定的默认集而非用户自建领域，
+// 既能保证标签口径统一、又把 LLM 判定次数限制在这组之内。
+const DEFAULT_DOMAINS = [
+  "情感两性",
+  "职场成长",
+  "财经理财",
+  "健康养生",
+  "育儿教育",
+  "社会热点",
+  "历史文化",
+  "影视娱乐",
+  "科技互联网",
+  "法制普法",
+];
+
+// 用「逐个领域并行做服务端语义判断（matchTodayTopics）」给今日热点打领域标签，
+// 返回 下标 -> 命中的领域标签集合。renderDomainFilteredHot（只留命中项）与
+// renderAllPlatformsHot（全部保留、给每条挂分类小标签）共用这套判定，保证标签口径一致。
+async function tagTopicsByDomains(
+  all: { platform: string; title: string }[],
+  domainList: string[],
+  userGlossary: Record<string, string>
+): Promise<Map<number, string[]>> {
+  const tagsByIndex = new Map<number, string[]>();
+  if (all.length === 0 || domainList.length === 0) return tagsByIndex;
+  const results = await Promise.all(
+    domainList.map(async (d) => {
+      const meaning =
+        (userGlossary[d] || "").trim() ||
+        (DOMAIN_GLOSSARY.find((g) => g.test.test(d))?.note || "").trim();
+      const hit = await matchTodayTopics(d, meaning, all);
+      return { d, hit };
+    })
+  );
+  for (const { d, hit } of results) {
+    for (const idx of hit) {
+      const arr = tagsByIndex.get(idx) || [];
+      arr.push(d);
+      tagsByIndex.set(idx, arr);
+    }
+  }
+  return tagsByIndex;
+}
+
 // 确定性渲染"未选领域"时的全量热榜（根治"没选领域却还按历史领域筛选"）：
 // 提示词/系统提醒都试过，模型仍会沿用对话历史里的旧领域锁定去过滤。既然未选领域时用户要的
 // 就是"每个榜前 N 条、不筛选"，那就【完全绕开模型正文】，直接用本轮 fetch_hot_topics 抓到的
 // 原始数据在服务端拼装，保证 100% 确定：抓了哪些平台就出哪些平台，各取热度前 N 条，不做任何领域过滤。
-function renderAllPlatformsHot(
+// 在"不筛选"的前提下，额外用 DEFAULT_DOMAINS 给每条热点挂上分类小标签（tagTopicsByDomains），
+// 让未指定领域时也能一眼看出每条属于哪个分类；某条谁都不命中就不挂标签。
+async function renderAllPlatformsHot(
   fetchedByPlatform: Map<string, any[]>,
+  domainUniverse: string[],
+  userGlossary: Record<string, string>,
   perPlatform = 20
-): string {
-  const blocks: string[] = [];
+): Promise<string> {
+  // 先按平台切片、摊平成全局有序列表，保证打标签用的下标与渲染顺序严格对齐。
+  const perPlatformTitles: { platform: string; titles: string[] }[] = [];
+  const all: { platform: string; title: string }[] = [];
   for (const [platform, topics] of fetchedByPlatform) {
     if (!Array.isArray(topics) || topics.length === 0) continue;
-    const lines = topics
+    const titles = topics
       .slice(0, perPlatform)
-      .map((t: any, i: number) => {
-        const title = (t?.title || t?.word || t?.name || "").toString().trim();
-        return title ? `${i + 1}. ${title}` : "";
-      })
+      .map((t: any) => (t?.title || t?.word || t?.name || "").toString().trim())
       .filter(Boolean);
-    if (lines.length === 0) continue;
+    if (titles.length === 0) continue;
+    perPlatformTitles.push({ platform, titles });
+    for (const title of titles) all.push({ platform, title });
+  }
+  if (all.length === 0) return "";
+
+  const tagsByIndex = await tagTopicsByDomains(all, domainUniverse, userGlossary);
+
+  const blocks: string[] = [];
+  let gi = 0;
+  for (const { platform, titles } of perPlatformTitles) {
+    const lines = titles.map((title, i) => {
+      const tags = tagsByIndex.get(gi);
+      gi++;
+      const tagStr =
+        tags && tags.length ? " " + tags.map((t) => `【${t}】`).join("") : "";
+      return `${i + 1}. ${title}${tagStr}`;
+    });
     blocks.push(`🔥 ${platform} 今日热榜\n${lines.join("\n")}`);
   }
-  if (blocks.length === 0) return "";
   return (
-    `已从各平台抓取今日实时热榜（未指定领域，按各平台热度展示前 ${perPlatform} 条，不做领域筛选）：\n\n` +
+    `已从各平台抓取今日实时热榜（未指定领域，按各平台热度展示前 ${perPlatform} 条，不做领域筛选，仅按分类打标签）：\n\n` +
     blocks.join("\n\n") +
     `\n\n如需只看某个领域，在顶部「领域」里选择后再让我抓一次即可。`
   );
@@ -767,24 +831,8 @@ async function renderDomainFilteredHot(
   }
   if (all.length === 0) return "";
 
-  // 逐个领域并行判断命中（每个领域一次 LLM 判断，互不依赖），记录 下标 -> 命中的领域标签集合。
-  const results = await Promise.all(
-    domainList.map(async (d) => {
-      const meaning =
-        (userGlossary[d] || "").trim() ||
-        (DOMAIN_GLOSSARY.find((g) => g.test.test(d))?.note || "").trim();
-      const hit = await matchTodayTopics(d, meaning, all);
-      return { d, hit };
-    })
-  );
-  const tagsByIndex = new Map<number, string[]>();
-  for (const { d, hit } of results) {
-    for (const idx of hit) {
-      const arr = tagsByIndex.get(idx) || [];
-      arr.push(d);
-      tagsByIndex.set(idx, arr);
-    }
-  }
+  // 逐个领域并行判断命中，得到 下标 -> 命中领域标签集合。
+  const tagsByIndex = await tagTopicsByDomains(all, domainList, userGlossary);
 
   // 汇总输出：只输出至少命中一个领域的热点，保持原始顺序，顺序编号。
   const lines: string[] = [];
@@ -1237,7 +1285,11 @@ export async function POST(req: NextRequest) {
             fetchedByPlatform.size > 0
               ? fetchedByPlatform
               : await fetchPlatformsHot(platforms);
-          const deterministic = renderAllPlatformsHot(fbp);
+          const deterministic = await renderAllPlatformsHot(
+            fbp,
+            DEFAULT_DOMAINS,
+            userGlossary
+          );
           if (deterministic) {
             return NextResponse.json({
               content: deterministic,
@@ -1376,7 +1428,11 @@ export async function POST(req: NextRequest) {
         fetchedByPlatform.size > 0
           ? fetchedByPlatform
           : await fetchPlatformsHot(platforms);
-      const deterministic = renderAllPlatformsHot(fbp);
+      const deterministic = await renderAllPlatformsHot(
+        fbp,
+        DEFAULT_DOMAINS,
+        userGlossary
+      );
       if (deterministic) {
         return NextResponse.json({
           content: deterministic,

@@ -56,7 +56,10 @@ const genSyncCode = () => {
 };
 
 const PLATFORMS = ["微博", "知乎", "B站", "抖音", "小红书", "头条", "百度"];
-const DOMAINS = ["科技数码", "职场成长", "美食探店", "娱乐八卦", "财经理财", "健康养生", "教育学习", "旅行出行"];
+const DOMAINS = ["情感两性", "职场成长", "财经理财", "健康养生", "育儿教育", "社会热点", "历史文化", "影视娱乐", "科技互联网", "法制普法"];
+// 旧版默认分类：仅用于迁移已持久化在 localStorage 里的领域列表——把不在新默认集里的旧默认项
+// 剔除、换成新默认项，同时保留用户自建领域。让"改默认分类"对老用户也即时生效。
+const LEGACY_DEFAULT_DOMAINS = ["科技数码", "职场成长", "美食探店", "娱乐八卦", "财经理财", "健康养生", "教育学习", "旅行出行"];
 
 // 领域最多同时选中的数量：选满后再点会弹窗让用户挑一个替换
 const MAX_DOMAINS = 3;
@@ -301,11 +304,31 @@ export default function Home() {
       const savedOptions = localStorage.getItem("domainOptions");
       const savedSelected = localStorage.getItem("selectedDomains");
       const savedNotes = localStorage.getItem("domainNotes");
-      if (savedOptions) setDomainOptions(JSON.parse(savedOptions));
+      // 迁移旧默认分类 → 新默认分类：删除已不在新默认集里的旧默认项，保留用户自建领域，
+      // 新默认项统一前置。这样"改默认分类"对老用户（localStorage 存了旧默认）也即时生效。
+      let mergedOptions: string[] = [...DOMAINS];
+      if (savedOptions) {
+        const persisted = JSON.parse(savedOptions);
+        if (Array.isArray(persisted)) {
+          const customs = persisted.filter(
+            (d: unknown): d is string =>
+              typeof d === "string" &&
+              !LEGACY_DEFAULT_DOMAINS.includes(d) &&
+              !DOMAINS.includes(d)
+          );
+          mergedOptions = [...DOMAINS, ...customs];
+        }
+      }
+      setDomainOptions(mergedOptions);
       if (savedSelected) {
         const arr = JSON.parse(savedSelected);
-        // 兼容旧数据：以前可能存了全选(8个)，现在上限是 MAX_DOMAINS，超出则截断
-        if (Array.isArray(arr)) setSelectedDomains(arr.slice(0, MAX_DOMAINS));
+        // 兼容旧数据：以前可能存了全选(8个)，现在上限是 MAX_DOMAINS；同时剔除迁移后已不存在的领域。
+        if (Array.isArray(arr))
+          setSelectedDomains(
+            arr
+              .filter((d: string) => mergedOptions.includes(d))
+              .slice(0, MAX_DOMAINS)
+          );
       }
       if (savedNotes) setDomainNotes(JSON.parse(savedNotes));
 
