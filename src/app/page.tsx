@@ -194,7 +194,12 @@ export default function Home() {
   ];
   // 非 null 时弹窗打开，携带目标热点的话题/平台/已抓取的详细报道（作为生成脚本的事实依据）
   const [scriptModal, setScriptModal] = useState<
-    { topic: string; platform: string; report: string } | null
+    {
+      topic: string;
+      platform: string;
+      report: string;
+      material?: { oneLine?: string; memes?: string[]; angles?: string[] } | null;
+    } | null
   >(null);
   const [scriptType, setScriptType] = useState<ScriptType>("口播稿");
   const [scriptPlot, setScriptPlot] = useState(""); // 脚本(选填)
@@ -203,14 +208,19 @@ export default function Home() {
   const [scriptGenerating, setScriptGenerating] = useState(false); // 一键生成进行中
   const [durationIdx, setDurationIdx] = useState(2); // 脚本时长档位，默认 1分30秒（index 2）
 
-  const openScriptModal = (topic: string, platform: string, report: string) => {
+  const openScriptModal = (
+    topic: string,
+    platform: string,
+    report: string,
+    material?: DetailData["material"]
+  ) => {
     setScriptType("口播稿");
     setScriptPlot("");
     setScriptEmbed("");
     setPolishing(false);
     setScriptGenerating(false);
     setDurationIdx(2);
-    setScriptModal({ topic, platform, report });
+    setScriptModal({ topic, platform, report, material: material ?? null });
   };
 
   // 从「口播素材」卡片点击金句/角度，回填到生成脚本弹窗对应输入框：
@@ -219,7 +229,12 @@ export default function Home() {
   const fillScriptField = (
     field: "embed" | "plot",
     text: string,
-    ctx: { topic: string; platform: string; report: string }
+    ctx: {
+      topic: string;
+      platform: string;
+      report: string;
+      material?: DetailData["material"];
+    }
   ) => {
     const clean = cleanMarkdown(text).trim();
     if (!clean) return;
@@ -230,7 +245,12 @@ export default function Home() {
       setScriptGenerating(false);
       setScriptEmbed(field === "embed" ? clean : "");
       setScriptPlot(field === "plot" ? clean : "");
-      setScriptModal({ topic: ctx.topic, platform: ctx.platform, report: ctx.report });
+      setScriptModal({
+        topic: ctx.topic,
+        platform: ctx.platform,
+        report: ctx.report,
+        material: ctx.material ?? null,
+      });
       return;
     }
     const append = (prev: string, sep: string) =>
@@ -1425,7 +1445,12 @@ export default function Home() {
             {st?.data && (
               <button
                 onClick={() =>
-                  openScriptModal(topic, platform, st.data?.report || "")
+                  openScriptModal(
+                    topic,
+                    platform,
+                    st.data?.report || "",
+                    st.data?.material
+                  )
                 }
                 className="align-middle ml-2 whitespace-nowrap text-[11px] leading-none px-2 py-1 rounded-full border border-purple-300 text-purple-600 hover:bg-purple-50 transition"
               >
@@ -1481,6 +1506,7 @@ export default function Home() {
                                       topic,
                                       platform,
                                       report: st.data?.report || "",
+                                      material: st.data?.material,
                                     })
                                   }
                                   title="点击填入「希望植入的梗」"
@@ -1509,6 +1535,7 @@ export default function Home() {
                                         topic,
                                         platform,
                                         report: st.data?.report || "",
+                                        material: st.data?.material,
                                       })
                                     }
                                     title="点击填入「剧情」"
@@ -1801,6 +1828,42 @@ export default function Home() {
                   {polishing ? "润色中…" : "润色剧情"}
                 </button>
               </div>
+              {(scriptModal.material?.angles?.length ?? 0) > 0 && (
+                <div className="pt-0.5">
+                  <div className="text-[11px] text-gray-400 mb-1">
+                    素材推荐角度（点击添加到剧情）
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {scriptModal.material!.angles!.map((a, k) => {
+                      const clean = cleanMarkdown(a);
+                      const picked = scriptPlot.includes(clean);
+                      return (
+                        <button
+                          key={k}
+                          onClick={() =>
+                            fillScriptField("plot", a, {
+                              topic: scriptModal.topic,
+                              platform: scriptModal.platform,
+                              report: scriptModal.report,
+                              material: scriptModal.material,
+                            })
+                          }
+                          className={`flex items-start gap-1.5 text-left text-xs rounded px-2 py-1 border transition ${
+                            picked
+                              ? "border-purple-300 bg-purple-50 text-purple-500"
+                              : "border-gray-200 text-gray-600 hover:border-purple-300 hover:bg-purple-50"
+                          }`}
+                        >
+                          <span className="leading-none">
+                            {picked ? "✓" : "+"}
+                          </span>
+                          <span className="leading-relaxed">{clean}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* 希望植入的梗、台词或桥段 */}
@@ -1815,6 +1878,40 @@ export default function Home() {
                 placeholder="输入想要植入的梗、彩蛋、特定台词、名场面，AI会尽量将其融入生成的脚本中。"
                 className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 focus:border-purple-400 focus:outline-none resize-y"
               />
+              {(scriptModal.material?.memes?.length ?? 0) > 0 && (
+                <div className="pt-0.5">
+                  <div className="text-[11px] text-gray-400 mb-1">
+                    素材推荐金句 / 热梗（点击添加）
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {scriptModal.material!.memes!.map((m, k) => {
+                      const clean = cleanMarkdown(m);
+                      const picked = scriptEmbed.includes(clean);
+                      return (
+                        <button
+                          key={k}
+                          onClick={() =>
+                            fillScriptField("embed", m, {
+                              topic: scriptModal.topic,
+                              platform: scriptModal.platform,
+                              report: scriptModal.report,
+                              material: scriptModal.material,
+                            })
+                          }
+                          className={`text-[11px] px-2 py-0.5 rounded-full border transition ${
+                            picked
+                              ? "border-purple-300 bg-purple-50 text-purple-500"
+                              : "border-gray-200 text-gray-600 hover:border-purple-300 hover:bg-purple-50"
+                          }`}
+                        >
+                          {picked ? "✓ " : "+ "}
+                          {clean}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* 底部操作：取消 / 一键生成脚本 */}
