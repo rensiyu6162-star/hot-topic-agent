@@ -235,18 +235,9 @@ async function tryFetchSources(sources: (() => Promise<any[]>)[], platform: stri
 async function fetchWeiboHot(): Promise<any[]> {
   return tryFetchSources([
     async () => {
-      // 源1：本地 DailyHotApi
-      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/weibo`);
-      const json = await res.json();
-      const list = json?.data || [];
-      if (list.length === 0) throw new Error("empty");
-      return list.slice(0, 20).map((item: any, i: number) => ({
-        rank: i + 1, title: item.title, hot: item.hot || 0,
-        url: item.url || item.mobileUrl || "",
-      }));
-    },
-    async () => {
-      // 源2（备用）：微博官方 Ajax 接口
+      // 源1：微博官方 Ajax 接口（实测可用）。
+      // ⚠️ 顺序有意把它放前面：DailyHotApi 的 /weibo 实测已返回 HTTP 500，
+      // 放前面等于每次请求先白跑一个失败往返。
       const res = await fetchWithTimeout("https://weibo.com/ajax/side/hotSearch", {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://weibo.com/" },
       });
@@ -256,6 +247,17 @@ async function fetchWeiboHot(): Promise<any[]> {
       return list.slice(0, 20).map((item: any, i: number) => ({
         rank: i + 1, title: item.word || item.note, hot: item.num || 0,
         url: `https://s.weibo.com/weibo?q=${encodeURIComponent(item.word || item.note)}`,
+      }));
+    },
+    async () => {
+      // 源2（备用）：本地 DailyHotApi
+      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/weibo`);
+      const json = await res.json();
+      const list = json?.data || [];
+      if (list.length === 0) throw new Error("empty");
+      return list.slice(0, 20).map((item: any, i: number) => ({
+        rank: i + 1, title: item.title, hot: item.hot || 0,
+        url: item.url || item.mobileUrl || "",
       }));
     },
   ], "微博热搜暂时无法获取，建议稍后重试");
@@ -275,18 +277,27 @@ async function fetchZhihuHot(): Promise<any[]> {
       }));
     },
     async () => {
-      // 源2（备用）：知乎官方 API
-      const res = await fetchWithTimeout("https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total?limit=20", {
+      // 源2（备用·独立于 DailyHotApi）：知乎移动端 API。
+      // ⚠️ 原来这里用 www.zhihu.com/api/v3/feed/topstory/hot-lists/total，实测已返回 401 未授权，
+      // 等于知乎位没有任何备用源。api.zhihu.com 这条移动端接口无需登录，实测 30 条可用。
+      const res = await fetchWithTimeout("https://api.zhihu.com/topstory/hot-lists/total?limit=20", {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
       });
       const json = await res.json();
       const list = json?.data || [];
       if (list.length === 0) throw new Error("empty");
       return list.slice(0, 20).map((item: any, i: number) => ({
-        rank: i + 1, title: item.target?.title || "未知",
+        rank: i + 1,
+        title: item.target?.title || "未知",
         excerpt: item.target?.excerpt?.slice(0, 80) || "",
         hot: item.detail_text || "",
-        url: `https://www.zhihu.com/question/${item.target?.id || ""}`,
+        // ⚠️ 别用 target.id 拼链接：知乎新问题 id 已超过 JS 安全整数范围
+        // （如 2076094940300272847），JSON.parse 会四舍五入成 ...273000，链接直接 404。
+        // target.url 是字符串（api.zhihu.com/questions/xxx），无精度问题，只换域名。
+        url: (item.target?.url || "").replace(
+          "api.zhihu.com/questions/",
+          "www.zhihu.com/question/"
+        ) || `https://www.zhihu.com/question/${item.target?.id || ""}`,
       }));
     },
   ], "知乎热榜暂时无法获取，建议稍后重试");
@@ -334,15 +345,25 @@ async function fetchDouyinHot(): Promise<any[]> {
       }));
     },
     async () => {
-      // 源2（备用）：抖音官方热搜 API
-      const res = await fetchWithTimeout("https://www.douyin.com/aweme/v1/web/hot/search/list/", {
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+      // 源2（备用·独立于 DailyHotApi）：iesdouyin 热搜榜。
+      // ⚠️ 原来这里用 www.douyin.com/aweme/v1/web/hot/search/list/，实测已失效——
+      // 未签名请求返回 HTTP 200 但 body 为空，等于抖音位没有任何备用源。
+      // iesdouyin 这个老接口不需要签名，实测 status_code=0、word_list 50 条可用。
+      const res = await fetchWithTimeout("https://www.iesdouyin.com/web/api/v2/hotsearch/billboard/word/", {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Referer": "https://www.douyin.com/",
+        },
       });
       const json = await res.json();
-      const list = json?.data?.word_list || [];
+      const list = json?.word_list || [];
       if (list.length === 0) throw new Error("empty");
       return list.slice(0, 20).map((item: any, i: number) => ({
-        rank: i + 1, title: item.word || "未知", url: "",
+        rank: i + 1,
+        title: item.word || "未知",
+        hot: item.hot_value || 0,
+        // 该接口只给热词不给话题页链接，退化成站内搜索页（仍可点开看内容）
+        url: `https://www.douyin.com/search/${encodeURIComponent(item.word || "")}`,
       }));
     },
   ], "抖音热榜暂时无法获取，建议稍后重试");
@@ -419,14 +440,23 @@ async function fetchToutiaoHot(): Promise<any[]> {
       }));
     },
     async () => {
-      // 源2（备用）：百度热搜
-      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/baidu`);
+      // 源2（备用·独立于 DailyHotApi）：今日头条官方热榜。
+      // ⚠️ 原来这里退到 DailyHotApi 的 /baidu，两个源都走 DailyHotApi，它一挂头条位直接没数据；
+      // 且 /baidu 实测只返回 1 条（形同失效）。改成头条官方 hot-board，实测 50 条可用。
+      const res = await fetchWithTimeout("https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc", {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Referer": "https://www.toutiao.com/",
+        },
+      });
       const json = await res.json();
       const list = json?.data || [];
       if (list.length === 0) throw new Error("empty");
       return list.slice(0, 20).map((item: any, i: number) => ({
-        rank: i + 1, title: item.title, hot: item.hot || 0, url: item.url || "",
-        note: "数据来源：百度热搜（头条接口暂不可用时的替代）",
+        rank: i + 1,
+        title: item.Title || "未知",
+        hot: item.HotValue || 0,
+        url: item.Url || `https://www.toutiao.com/trending/${item.ClusterIdStr || ""}/`,
       }));
     },
   ], "头条热榜暂时无法获取，建议稍后重试");
@@ -435,18 +465,9 @@ async function fetchToutiaoHot(): Promise<any[]> {
 async function fetchBaiduHot(): Promise<any[]> {
   return tryFetchSources([
     async () => {
-      // 源1：本地 DailyHotApi
-      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/baidu`);
-      const json = await res.json();
-      const list = Array.isArray(json?.data) ? json.data : [];
-      const items = list.filter((x: any) => (x.title || "").trim());
-      if (items.length < 3) throw new Error("empty");
-      return items.slice(0, 20).map((item: any, i: number) => ({
-        rank: i + 1, title: item.title, hot: item.hot || 0, url: item.url || "",
-      }));
-    },
-    async () => {
-      // 源2（备用）：百度热搜榜单官方 API（top.baidu.com，国内可直连）
+      // 源1：百度热搜榜单官方 API（top.baidu.com，国内可直连，实测可用）。
+      // ⚠️ 顺序有意把它放前面：DailyHotApi 的 /baidu 实测只返回 1 条（total:1），
+      // 必然被下面的 length<3 判定抛掉，放前面等于每次先白跑一个失败往返。
       const res = await fetchWithTimeout(
         "https://top.baidu.com/api/board?platform=wise&tab=realtime",
         { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://top.baidu.com/" } }
@@ -470,6 +491,17 @@ async function fetchBaiduHot(): Promise<any[]> {
           item.rawUrl ||
           item.url ||
           `https://www.baidu.com/s?wd=${encodeURIComponent(item.word || item.query || "")}`,
+      }));
+    },
+    async () => {
+      // 源2（备用）：本地 DailyHotApi
+      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/baidu`);
+      const json = await res.json();
+      const list = Array.isArray(json?.data) ? json.data : [];
+      const items = list.filter((x: any) => (x.title || "").trim());
+      if (items.length < 3) throw new Error("empty");
+      return items.slice(0, 20).map((item: any, i: number) => ({
+        rank: i + 1, title: item.title, hot: item.hot || 0, url: item.url || "",
       }));
     },
     async () => {
