@@ -332,6 +332,24 @@ async function fetchBilibiliHot(): Promise<any[]> {
   ], "B站热榜暂时无法获取，建议稍后重试");
 }
 
+const DOUYIN_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+
+// 抖音三个非 DailyHotApi 源返回的都是 word_list 结构（word / hot_value / sentence_id），统一解析。
+// sentence_id 存在时拼真实话题聚合页，否则退化成站内搜索页。
+function parseDouyinWordList(list: any): any[] {
+  const items = Array.isArray(list) ? list : [];
+  if (items.length === 0) throw new Error("empty");
+  return items.slice(0, 20).map((item: any, i: number) => ({
+    rank: i + 1,
+    title: item.word || "未知",
+    hot: item.hot_value || 0,
+    url: item.sentence_id
+      ? `https://www.douyin.com/hot/${item.sentence_id}`
+      : `https://www.douyin.com/search/${encodeURIComponent(item.word || "")}`,
+  }));
+}
+
 async function fetchDouyinHot(): Promise<any[]> {
   return tryFetchSources([
     async () => {
@@ -345,26 +363,32 @@ async function fetchDouyinHot(): Promise<any[]> {
       }));
     },
     async () => {
-      // 源2（备用·独立于 DailyHotApi）：iesdouyin 热搜榜。
-      // ⚠️ 原来这里用 www.douyin.com/aweme/v1/web/hot/search/list/，实测已失效——
-      // 未签名请求返回 HTTP 200 但 body 为空，等于抖音位没有任何备用源。
-      // iesdouyin 这个老接口不需要签名，实测 status_code=0、word_list 50 条可用。
-      const res = await fetchWithTimeout("https://www.iesdouyin.com/web/api/v2/hotsearch/billboard/word/", {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          "Referer": "https://www.douyin.com/",
-        },
-      });
-      const json = await res.json();
-      const list = json?.word_list || [];
-      if (list.length === 0) throw new Error("empty");
-      return list.slice(0, 20).map((item: any, i: number) => ({
-        rank: i + 1,
-        title: item.word || "未知",
-        hot: item.hot_value || 0,
-        // 该接口只给热词不给话题页链接，退化成站内搜索页（仍可点开看内容）
-        url: `https://www.douyin.com/search/${encodeURIComponent(item.word || "")}`,
-      }));
+      // 源2（独立于 DailyHotApi）：抖音官方 web 热搜接口。
+      // ⚠️ 关键：必须带 device_platform=webapp&aid=6383，否则返回 HTTP 200 但 body 为空
+      // （之前误判这个接口"已失效"，其实只是缺参数）。实测 status_code=0、word_list 49 条。
+      const res = await fetchWithTimeout(
+        "https://www.douyin.com/aweme/v1/web/hot/search/list/?device_platform=webapp&aid=6383&channel=channel_pc_web",
+        { headers: { "User-Agent": DOUYIN_UA, "Referer": "https://www.douyin.com/" } }
+      );
+      return parseDouyinWordList((await res.json())?.data?.word_list);
+    },
+    async () => {
+      // 源3（独立主机）：抖音 App 端热搜接口（aweme.snssdk.com，与 www.douyin.com 不同域，
+      // 主域被限时仍可能通）。实测 status_code=0、word_list 49 条，结构同源2。
+      const res = await fetchWithTimeout(
+        "https://aweme.snssdk.com/aweme/v1/hot/search/list/?device_platform=android&version_code=990&aid=1128",
+        { headers: { "User-Agent": DOUYIN_UA } }
+      );
+      return parseDouyinWordList((await res.json())?.data?.word_list);
+    },
+    async () => {
+      // 源4（免签名老接口）：iesdouyin 热搜榜。实测 status_code=0、word_list 50 条，
+      // 但只给热词不给 sentence_id，链接会退化成站内搜索页。
+      const res = await fetchWithTimeout(
+        "https://www.iesdouyin.com/web/api/v2/hotsearch/billboard/word/",
+        { headers: { "User-Agent": DOUYIN_UA, "Referer": "https://www.douyin.com/" } }
+      );
+      return parseDouyinWordList((await res.json())?.word_list);
     },
   ], "抖音热榜暂时无法获取，建议稍后重试");
 }
@@ -412,8 +436,17 @@ async function fetchXiaohongshuHot(): Promise<any[]> {
         url: `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(title)}`,
       }));
     },
+    // ⚠️ 这里曾有个"源3"：小红书两路都失败时，改抓 DailyHotApi 的 /smzdm（什么值得买），
+    // 挂在「小红书」名下只用一行 note 说明。已按"是什么源就什么源、出不了就别出、不做硬性替代"
+    // 移除——小红书自己的源都不通时就如实报不可用；什么值得买已作为独立平台单列（fetchSmzdmHot）。
+  ], "小红书热榜暂时无法获取（官方接口已限制访问）");
+}
+
+// 什么值得买：种草/好物/生活方式热榜，作为**独立平台**存在，
+// 不再冒充小红书的替代数据。数据源目前只有 DailyHotApi。
+async function fetchSmzdmHot(): Promise<any[]> {
+  return tryFetchSources([
     async () => {
-      // 源3：什么值得买热榜（种草/好物/生活方式，与小红书调性最接近，作为替代数据源）
       const res = await fetchWithTimeout(`${DAILYHOT_BASE}/smzdm`);
       const json = await res.json();
       const list = Array.isArray(json?.data) ? json.data : [];
@@ -421,10 +454,9 @@ async function fetchXiaohongshuHot(): Promise<any[]> {
       if (items.length < 3) throw new Error("empty");
       return items.slice(0, 20).map((item: any, i: number) => ({
         rank: i + 1, title: item.title, url: item.url || item.mobileUrl || "",
-        note: "数据来源：什么值得买热榜（小红书无公开接口，用种草/生活方式内容替代）",
       }));
     },
-  ], "小红书热榜暂时无法获取，建议稍后重试");
+  ], "什么值得买热榜暂时无法获取，建议稍后重试");
 }
 
 async function fetchToutiaoHot(): Promise<any[]> {
@@ -504,17 +536,8 @@ async function fetchBaiduHot(): Promise<any[]> {
         rank: i + 1, title: item.title, hot: item.hot || 0, url: item.url || "",
       }));
     },
-    async () => {
-      // 源3（兜底）：今日头条热榜（百度接口全部失效时的替代）
-      const res = await fetchWithTimeout(`${DAILYHOT_BASE}/toutiao`);
-      const json = await res.json();
-      const list = json?.data || [];
-      if (list.length === 0) throw new Error("empty");
-      return list.slice(0, 20).map((item: any, i: number) => ({
-        rank: i + 1, title: item.title, hot: item.hot || 0, url: item.url || "",
-        note: "数据来源：今日头条热榜（百度接口暂不可用时的替代）",
-      }));
-    },
+    // ⚠️ 这里曾有个"源3"：百度两路都失败时改抓 DailyHotApi 的 /toutiao，挂在「百度」名下。
+    // 已按"是什么源就什么源、出不了就别出、不做硬性替代"移除——头条数据本来就有独立的「头条」平台。
   ], "百度热搜暂时无法获取，建议稍后重试");
 }
 
@@ -526,6 +549,7 @@ const PLATFORM_FETCHERS: Record<string, () => Promise<any[]>> = {
   小红书: fetchXiaohongshuHot,
   头条: fetchToutiaoHot,
   百度: fetchBaiduHot,
+  什么值得买: fetchSmzdmHot,
 };
 
 // ========== Tools Definition ==========
@@ -541,7 +565,7 @@ const TOOLS = [
         properties: {
           platform: {
             type: "string",
-            enum: ["微博", "知乎", "B站", "抖音", "小红书", "头条", "百度"],
+            enum: ["微博", "知乎", "B站", "抖音", "小红书", "头条", "百度", "什么值得买"],
             description: "目标平台名称",
           },
         },
@@ -1313,7 +1337,7 @@ ${
     : `\n🔓【用户已清空所有创作领域 = 最高优先级，凌驾于对话历史之上】用户当前在界面上【没有选择任何创作领域】。这条以本条系统提示为准：无论对话历史里之前是否锁定过某个领域（例如「女性成长」或任何其它领域），那份锁定【现在已经全部失效、作废】——因为用户已经把所有领域都取消了。你【绝对不要】再按任何历史领域去筛选、剔除或重排热点，也【绝对不要】沿用上一轮回复里针对某个领域的筛选结果。\n- ✅ 你【必须】列出各平台抓到的【全部】热点，按各平台榜单原始热度顺序展示，【不做任何领域筛选、不做剔除、不加 ⭐ 相关度标记、不做重排】。\n- ✅ 每一条热点后面用【】标注它所属的创作领域标签（可多标），标签自由从常见领域集合里选取，而不是局限在任何历史锁定过的领域。\n- ⚠️ 只要用户要求抓取/刷新，你就【必须】重新调用 fetch_hot_topics 并输出全量带标签结果，【严禁】回复"无变化""与上次相同"或原样复用上一轮列表。\n`
 }
 你的能力：
-1. fetch_hot_topics: 从微博、知乎、B站、抖音、小红书、头条、百度抓取实时热点
+1. fetch_hot_topics: 从微博、知乎、B站、抖音、小红书、头条、百度、什么值得买抓取实时热点
 2. filter_hot_by_domain: 用 AI 判断哪些热点和用户领域相关
 3. generate_video_script: 根据热点生成短视频脚本（Hook → 痛点 → 内容 → CTA）
 4. search_recent_topics_by_domain: 小众/垂直领域今日实时热榜无相关热点时，检索该领域近30天内容做兜底
