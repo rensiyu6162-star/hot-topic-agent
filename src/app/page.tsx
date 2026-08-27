@@ -1668,19 +1668,26 @@ export default function Home() {
             <div className="space-y-1.5">
               <label className="text-sm font-medium text-gray-700">脚本类型</label>
               <div className="flex gap-2">
-                {(["口播稿", "情景演绎", "AI生视频"] as ScriptType[]).map((t) => (
-                  <button
-                    key={t}
-                    onClick={() => setScriptType(t)}
-                    className={`flex-1 px-3 py-2 rounded-lg border text-sm transition ${
-                      scriptType === t
-                        ? "border-purple-400 bg-purple-50 text-purple-600 font-medium"
-                        : "border-gray-200 text-gray-600 hover:border-purple-300"
-                    }`}
-                  >
-                    {t}
-                  </button>
-                ))}
+                {(["口播稿", "情景演绎", "AI生视频"] as ScriptType[]).map((t) => {
+                  const disabled = t !== "口播稿";
+                  return (
+                    <button
+                      key={t}
+                      onClick={() => !disabled && setScriptType(t)}
+                      disabled={disabled}
+                      title={disabled ? "功能尚在开发中，敬请期待" : undefined}
+                      className={`flex-1 px-3 py-2 rounded-lg border text-sm transition ${
+                        disabled
+                          ? "border-gray-200 bg-gray-100 text-gray-300 cursor-not-allowed"
+                          : scriptType === t
+                          ? "border-purple-400 bg-purple-50 text-purple-600 font-medium"
+                          : "border-gray-200 text-gray-600 hover:border-purple-300"
+                      }`}
+                    >
+                      {t}
+                    </button>
+                  );
+                })}
               </div>
             </div>
             {/* 脚本时长：离散滑块（30秒步长，30秒~5分钟），实时展示时长+参考字数 */}
