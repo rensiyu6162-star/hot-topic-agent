@@ -880,12 +880,70 @@ async function tagTopicsByDomains(
   return tagsByIndex;
 }
 
+// 未选领域时给热点打「分类小标签」：只标每条【最核心的 1-3 个领域】，不再"沾边就挂"。
+// 与筛选路径（renderDomainFilteredHot 用的 tagTopicsByDomains/matchTodayTopics 从宽召回、宁多勿漏）
+// 目标相反——那边要尽量不漏，这边要清爽好读、有区分度。用户反馈"一条热点被挂了七八个领域、
+// 根本没涉及这么多"，根因就是拿从宽召回的口径来做展示标签。这里改成【逐条选主领域】：
+// 一次性把全部热点连同领域清单（含释义）交给 LLM，让它为每条只挑最贴切的 1-3 个领域，
+// 谁都不核心相关就不挂。相比逐领域并行判定（N 个领域 = N 次调用），这里是单次批量调用，更省。
+async function tagTopicsCoreDomains(
+  all: { platform: string; title: string }[],
+  domainList: string[],
+  userGlossary: Record<string, string>
+): Promise<Map<number, string[]>> {
+  const tagsByIndex = new Map<number, string[]>();
+  if (all.length === 0 || domainList.length === 0) return tagsByIndex;
+  const glossaryLines = domainList
+    .map((d) => {
+      const meaning =
+        (userGlossary[d] || "").trim() ||
+        (DOMAIN_GLOSSARY.find((g) => g.test.test(d))?.note || "").trim();
+      return meaning ? `- ${d}：${meaning}` : `- ${d}`;
+    })
+    .join("\n");
+  const list = all.map((it, i) => `${i}. ${it.title}`).join("\n");
+  const prompt = `下面有一份领域清单（含含义）和一批今日热点标题。请为【每一条】热点，从领域清单里挑出它【最核心、最贴切的 1-3 个领域】。
+判定原则（宁缺毋滥，只标主领域）：
+- 只标这条热点真正【主要在讲】的领域；不要因为"沾一点边、间接相关"就挂上，那样标签会糊成一片、失去区分度。
+- 每条最多 3 个领域，通常 1 个就够；只有当一条热点确实【横跨】多个领域时才给 2 或 3 个。
+- 一条热点若和清单里任何领域都谈不上核心相关，就不给它任何领域（该序号返回空数组或省略）。
+- 领域名必须【原样】来自下面的清单，不得自造、改写或合并。
+领域清单：
+${glossaryLines}
+
+今日热点：
+${list}
+
+只返回一个 JSON 对象，key 是热点序号（字符串），value 是该条最核心的领域名数组，例如 {"0":["科技互联网"],"3":["社会热点","法制普法"]}；谁都不贴切的序号可省略或给空数组。不要任何解释。`;
+  try {
+    const res: string = await callLLM([{ role: "user", content: prompt }], false);
+    const m = res.match(/\{[\s\S]*\}/);
+    if (!m) return tagsByIndex;
+    const obj = JSON.parse(m[0]) as Record<string, unknown>;
+    const allow = new Set(domainList);
+    for (const [k, v] of Object.entries(obj)) {
+      const idx = Number(k);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= all.length) continue;
+      if (!Array.isArray(v)) continue;
+      const tags = (v as unknown[])
+        .filter((x): x is string => typeof x === "string")
+        .map((s) => s.trim())
+        .filter((s) => allow.has(s))
+        .slice(0, 3);
+      if (tags.length) tagsByIndex.set(idx, tags);
+    }
+  } catch {
+    return tagsByIndex;
+  }
+  return tagsByIndex;
+}
+
 // 确定性渲染"未选领域"时的全量热榜（根治"没选领域却还按历史领域筛选"）：
 // 提示词/系统提醒都试过，模型仍会沿用对话历史里的旧领域锁定去过滤。既然未选领域时用户要的
 // 就是"每个榜前 N 条、不筛选"，那就【完全绕开模型正文】，直接用本轮 fetch_hot_topics 抓到的
 // 原始数据在服务端拼装，保证 100% 确定：抓了哪些平台就出哪些平台，各取热度前 N 条，不做任何领域过滤。
-// 在"不筛选"的前提下，额外用 DEFAULT_DOMAINS 给每条热点挂上分类小标签（tagTopicsByDomains），
-// 让未指定领域时也能一眼看出每条属于哪个分类；某条谁都不命中就不挂标签。
+// 在"不筛选"的前提下，额外用 DEFAULT_DOMAINS 给每条热点挂上分类小标签（tagTopicsCoreDomains，
+// 只标最核心的 1-3 个领域），让未指定领域时也能一眼看出每条属于哪个分类；某条谁都不核心相关就不挂标签。
 async function renderAllPlatformsHot(
   fetchedByPlatform: Map<string, any[]>,
   domainUniverse: string[],
@@ -907,7 +965,8 @@ async function renderAllPlatformsHot(
   }
   if (all.length === 0) return "";
 
-  const tagsByIndex = await tagTopicsByDomains(all, domainUniverse, userGlossary);
+  // 展示标签只标每条最核心的 1-3 个领域（逐条选主领域），避免"沾边就挂"糊成一片。
+  const tagsByIndex = await tagTopicsCoreDomains(all, domainUniverse, userGlossary);
 
   const blocks: string[] = [];
   let gi = 0;
