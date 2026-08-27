@@ -1757,16 +1757,29 @@ export default function Home() {
               <div className="flex gap-2">
                 {(["口播稿", "情景演绎", "AI生视频"] as ScriptType[]).map((t) => {
                   const disabled = t !== "口播稿";
+                  if (disabled) {
+                    return (
+                      <div key={t} className="relative flex-1 group cursor-not-allowed">
+                        <button
+                          disabled
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-gray-100 text-gray-300 text-sm cursor-not-allowed pointer-events-none"
+                        >
+                          {t}
+                        </button>
+                        {/* 自绘 tooltip：hover 即时显示，无系统延迟 */}
+                        <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 whitespace-nowrap rounded-md bg-gray-800 text-white text-[11px] px-2 py-1 opacity-0 group-hover:opacity-100 transition-opacity z-20 shadow-lg">
+                          功能尚在开发中，敬请期待
+                          <span className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-gray-800" />
+                        </div>
+                      </div>
+                    );
+                  }
                   return (
                     <button
                       key={t}
-                      onClick={() => !disabled && setScriptType(t)}
-                      disabled={disabled}
-                      title={disabled ? "功能尚在开发中，敬请期待" : undefined}
+                      onClick={() => setScriptType(t)}
                       className={`flex-1 px-3 py-2 rounded-lg border text-sm transition ${
-                        disabled
-                          ? "border-gray-200 bg-gray-100 text-gray-300 cursor-not-allowed"
-                          : scriptType === t
+                        scriptType === t
                           ? "border-purple-400 bg-purple-50 text-purple-600 font-medium"
                           : "border-gray-200 text-gray-600 hover:border-purple-300"
                       }`}
