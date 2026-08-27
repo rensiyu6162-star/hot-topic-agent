@@ -1743,7 +1743,7 @@ export default function Home() {
             className="absolute inset-0 bg-black/40"
             onClick={() => !scriptGenerating && setScriptModal(null)}
           />
-          <div className="relative z-10 w-full max-w-lg bg-white rounded-2xl shadow-xl p-5 space-y-4 max-h-[88vh] overflow-y-auto">
+          <div className="relative z-10 w-full max-w-lg bg-white rounded-2xl shadow-xl p-4 space-y-3 max-h-[88vh] overflow-y-auto">
             <div>
               <div className="font-bold text-gray-800">生成脚本</div>
               <p className="mt-1 text-xs text-gray-400 break-words">
@@ -1812,7 +1812,7 @@ export default function Home() {
               <textarea
                 value={scriptPlot}
                 onChange={(e) => setScriptPlot(e.target.value)}
-                rows={5}
+                rows={3}
                 placeholder="支持自定义输入剧情，也可融入你的个人想法，点击生成剧情按钮，即可完成剧情润色。"
                 className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 focus:border-purple-400 focus:outline-none resize-y"
               />
@@ -1868,7 +1868,7 @@ export default function Home() {
               <textarea
                 value={scriptEmbed}
                 onChange={(e) => setScriptEmbed(e.target.value)}
-                rows={3}
+                rows={2}
                 placeholder="输入想要植入的梗、彩蛋、特定台词、名场面，AI会尽量将其融入生成的脚本中。"
                 className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 focus:border-purple-400 focus:outline-none resize-y"
               />
