@@ -1744,25 +1744,25 @@ export default function Home() {
             onClick={() => !scriptGenerating && setScriptModal(null)}
           />
           <div className="relative z-10 w-full max-w-lg bg-white rounded-2xl shadow-xl p-4 space-y-3 max-h-[88vh] overflow-y-auto">
-            <div>
-              <div className="font-bold text-gray-800">生成脚本</div>
-              <p className="mt-1 text-xs text-gray-400 break-words">
+            <div className="flex items-baseline gap-2">
+              <div className="font-bold text-gray-800 shrink-0">生成脚本</div>
+              <p className="text-xs text-gray-400 truncate">
                 热点事件：{scriptModal.topic}
               </p>
             </div>
 
             {/* 脚本类型：三选一 */}
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <label className="text-sm font-medium text-gray-700">脚本类型</label>
               <div className="flex gap-2">
                 {(["口播稿", "情景演绎", "AI生视频"] as ScriptType[]).map((t) => {
                   const disabled = t !== "口播稿";
                   if (disabled) {
                     return (
-                      <div key={t} className="relative flex-1 group cursor-not-allowed">
+                      <div key={t} className="relative group cursor-not-allowed">
                         <button
                           disabled
-                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-gray-100 text-gray-300 text-sm cursor-not-allowed pointer-events-none"
+                          className="px-4 py-1 rounded-lg border border-gray-200 bg-gray-100 text-gray-300 text-sm cursor-not-allowed pointer-events-none"
                         >
                           {t}
                         </button>
@@ -1778,7 +1778,7 @@ export default function Home() {
                     <button
                       key={t}
                       onClick={() => setScriptType(t)}
-                      className={`flex-1 px-3 py-2 rounded-lg border text-sm transition ${
+                      className={`px-4 py-1 rounded-lg border text-sm transition ${
                         scriptType === t
                           ? "border-purple-400 bg-purple-50 text-purple-600 font-medium"
                           : "border-gray-200 text-gray-600 hover:border-purple-300"
@@ -1791,7 +1791,7 @@ export default function Home() {
               </div>
             </div>
             {/* 脚本时长：离散滑块（30秒步长，30秒~5分钟），实时展示时长+参考字数 */}
-            <div className="space-y-2">
+            <div className="space-y-1">
               <div className="flex items-baseline justify-between">
                 <label className="text-sm font-medium text-gray-700">脚本时长</label>
                 <span className="text-sm font-medium text-purple-600">
@@ -1810,7 +1810,7 @@ export default function Home() {
                 onChange={(e) => setDurationIdx(Number(e.target.value))}
                 className="w-full accent-purple-500 cursor-pointer"
               />
-              <div className="flex justify-between text-[10px] text-gray-300">
+              <div className="flex justify-between text-[10px] text-gray-300 -mt-1.5">
                 <span>30秒</span>
                 <span>5分钟</span>
               </div>
@@ -1819,21 +1819,14 @@ export default function Home() {
 
             {/* 脚本（选填）+ 润色剧情 */}
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-700">
-                剧情（选填）
-              </label>
-              <textarea
-                value={scriptPlot}
-                onChange={(e) => setScriptPlot(e.target.value)}
-                rows={3}
-                placeholder="支持自定义输入剧情，也可融入你的个人想法，点击生成剧情按钮，即可完成剧情润色。"
-                className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 focus:border-purple-400 focus:outline-none resize-y"
-              />
-              <div className="flex justify-end">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-gray-700">
+                  剧情（选填）
+                </label>
                 <button
                   onClick={polishPlot}
                   disabled={!scriptPlot.trim() || polishing}
-                  className={`px-3 py-1.5 rounded-lg border text-xs transition ${
+                  className={`px-3 py-1 rounded-lg border text-xs transition ${
                     !scriptPlot.trim() || polishing
                       ? "border-gray-200 text-gray-300 cursor-not-allowed"
                       : "border-purple-300 text-purple-600 hover:bg-purple-50"
@@ -1842,11 +1835,15 @@ export default function Home() {
                   {polishing ? "润色中…" : "润色剧情"}
                 </button>
               </div>
+              <textarea
+                value={scriptPlot}
+                onChange={(e) => setScriptPlot(e.target.value)}
+                rows={4}
+                placeholder="支持自定义输入剧情，也可融入你的个人想法，点击生成剧情按钮，即可完成剧情润色。"
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 focus:border-purple-400 focus:outline-none resize-y"
+              />
               {(scriptModal.material?.angles?.length ?? 0) > 0 && (
                 <div className="pt-0.5">
-                  <div className="text-[11px] text-gray-400 mb-1">
-                    素材推荐角度（点击添加到剧情）
-                  </div>
                   <div className="flex flex-col gap-1">
                     {scriptModal.material!.angles!.map((a, k) => {
                       const clean = cleanMarkdown(a);
@@ -1881,15 +1878,12 @@ export default function Home() {
               <textarea
                 value={scriptEmbed}
                 onChange={(e) => setScriptEmbed(e.target.value)}
-                rows={2}
+                rows={3}
                 placeholder="输入想要植入的梗、彩蛋、特定台词、名场面，AI会尽量将其融入生成的脚本中。"
                 className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 focus:border-purple-400 focus:outline-none resize-y"
               />
               {(scriptModal.material?.memes?.length ?? 0) > 0 && (
                 <div className="pt-0.5">
-                  <div className="text-[11px] text-gray-400 mb-1">
-                    素材推荐金句 / 热梗（点击添加）
-                  </div>
                   <div className="flex flex-wrap gap-1.5">
                     {scriptModal.material!.memes!.map((m, k) => {
                       const clean = cleanMarkdown(m);
