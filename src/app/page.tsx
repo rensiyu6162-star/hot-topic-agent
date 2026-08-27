@@ -213,6 +213,32 @@ export default function Home() {
     setScriptModal({ topic, platform, report });
   };
 
+  // 从「口播素材」卡片点击金句/角度，回填到生成脚本弹窗对应输入框：
+  // 金句 → 「希望植入的梗」（embed），角度 → 「剧情」（plot）。
+  // 弹窗未开则自动打开一个干净的弹窗；已开则去重后追加。
+  const fillScriptField = (
+    field: "embed" | "plot",
+    text: string,
+    ctx: { topic: string; platform: string; report: string }
+  ) => {
+    const clean = cleanMarkdown(text).trim();
+    if (!clean) return;
+    if (!scriptModal) {
+      setScriptType("口播稿");
+      setDurationIdx(2);
+      setPolishing(false);
+      setScriptGenerating(false);
+      setScriptEmbed(field === "embed" ? clean : "");
+      setScriptPlot(field === "plot" ? clean : "");
+      setScriptModal({ topic: ctx.topic, platform: ctx.platform, report: ctx.report });
+      return;
+    }
+    const append = (prev: string, sep: string) =>
+      prev.includes(clean) ? prev : prev ? `${prev}${sep}${clean}` : clean;
+    if (field === "embed") setScriptEmbed((p) => append(p, "；"));
+    else setScriptPlot((p) => append(p, "\n"));
+  };
+
   // 润色剧情：把用户输入的剧情想法，结合热点事件与已抓取报道，润色成一段简略的对应题材脚本，回填到脚本框
   const polishPlot = async () => {
     if (!scriptModal || !scriptPlot.trim() || polishing) return;
@@ -1442,15 +1468,26 @@ export default function Home() {
                           <div>
                             <div className="text-gray-500 mb-1">
                               热梗 / 金句
+                              <span className="ml-1 text-[10px] text-gray-400">
+                                （点击填入「希望植入的梗」）
+                              </span>
                             </div>
                             <div className="flex flex-wrap gap-1.5">
                               {st.data.material.memes!.map((m, k) => (
-                                <span
+                                <button
                                   key={k}
-                                  className="text-[11px] px-2 py-0.5 rounded-full bg-white border border-indigo-200 text-indigo-600"
+                                  onClick={() =>
+                                    fillScriptField("embed", m, {
+                                      topic,
+                                      platform,
+                                      report: st.data?.report || "",
+                                    })
+                                  }
+                                  title="点击填入「希望植入的梗」"
+                                  className="text-[11px] px-2 py-0.5 rounded-full bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-100 hover:border-indigo-300 transition cursor-pointer"
                                 >
                                   {cleanMarkdown(m)}
-                                </span>
+                                </button>
                               ))}
                             </div>
                           </div>
@@ -1459,10 +1496,32 @@ export default function Home() {
                           <div>
                             <div className="text-gray-500 mb-1">
                               口播切入角度
+                              <span className="ml-1 text-[10px] text-gray-400">
+                                （点击填入「剧情」）
+                              </span>
                             </div>
-                            <ul className="list-disc pl-4 space-y-0.5 text-gray-700">
+                            <ul className="space-y-0.5">
                               {st.data.material.angles!.map((a, k) => (
-                                <li key={k}>{cleanMarkdown(a)}</li>
+                                <li key={k}>
+                                  <button
+                                    onClick={() =>
+                                      fillScriptField("plot", a, {
+                                        topic,
+                                        platform,
+                                        report: st.data?.report || "",
+                                      })
+                                    }
+                                    title="点击填入「剧情」"
+                                    className="flex w-full items-start gap-1.5 text-left text-gray-700 rounded px-1 py-0.5 hover:bg-indigo-100 transition cursor-pointer"
+                                  >
+                                    <span className="text-indigo-400 leading-relaxed">
+                                      •
+                                    </span>
+                                    <span className="leading-relaxed">
+                                      {cleanMarkdown(a)}
+                                    </span>
+                                  </button>
+                                </li>
                               ))}
                             </ul>
                           </div>
