@@ -255,8 +255,9 @@ export default function Home() {
     }
     const append = (prev: string, sep: string) =>
       prev.includes(clean) ? prev : prev ? `${prev}${sep}${clean}` : clean;
+    // 金句（embed）去重追加；剧情（plot）每点一次追加一次，不去重
     if (field === "embed") setScriptEmbed((p) => append(p, "；"));
-    else setScriptPlot((p) => append(p, "\n"));
+    else setScriptPlot((p) => (p ? `${p}\n${clean}` : clean));
   };
 
   // 润色剧情：把用户输入的剧情想法，结合热点事件与已抓取报道，润色成一段简略的对应题材脚本，回填到脚本框
@@ -1836,7 +1837,6 @@ export default function Home() {
                   <div className="flex flex-col gap-1">
                     {scriptModal.material!.angles!.map((a, k) => {
                       const clean = cleanMarkdown(a);
-                      const picked = scriptPlot.includes(clean);
                       return (
                         <button
                           key={k}
@@ -1848,15 +1848,9 @@ export default function Home() {
                               material: scriptModal.material,
                             })
                           }
-                          className={`flex items-start gap-1.5 text-left text-xs rounded px-2 py-1 border transition ${
-                            picked
-                              ? "border-purple-300 bg-purple-50 text-purple-500"
-                              : "border-gray-200 text-gray-600 hover:border-purple-300 hover:bg-purple-50"
-                          }`}
+                          className="flex items-start gap-1.5 text-left text-xs rounded px-2 py-1 border border-gray-200 text-gray-600 hover:border-purple-300 hover:bg-purple-50 transition"
                         >
-                          <span className="leading-none">
-                            {picked ? "✓" : "+"}
-                          </span>
+                          <span className="leading-none">+</span>
                           <span className="leading-relaxed">{clean}</span>
                         </button>
                       );
