@@ -15,6 +15,7 @@ interface DetailData {
   report: string;
   sites: { title: string; url: string; source?: string; core?: boolean }[];
   videos: { title: string; url: string; app?: string; source?: string; core?: boolean }[];
+  material?: { oneLine?: string; memes?: string[]; angles?: string[] } | null;
 }
 
 interface DetailState {
@@ -1424,6 +1425,50 @@ export default function Home() {
                 </div>
               ) : st.data ? (
                 <>
+                  {st.data.material &&
+                    (st.data.material.oneLine ||
+                      (st.data.material.memes?.length ?? 0) > 0 ||
+                      (st.data.material.angles?.length ?? 0) > 0) && (
+                      <div className="rounded-lg bg-indigo-50 border border-indigo-100 p-2.5 space-y-2">
+                        <div className="font-semibold text-indigo-600">
+                          🎤 口播素材
+                        </div>
+                        {st.data.material.oneLine && (
+                          <div className="text-gray-700 leading-relaxed">
+                            {cleanMarkdown(st.data.material.oneLine)}
+                          </div>
+                        )}
+                        {(st.data.material.memes?.length ?? 0) > 0 && (
+                          <div>
+                            <div className="text-gray-500 mb-1">
+                              热梗 / 金句
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {st.data.material.memes!.map((m, k) => (
+                                <span
+                                  key={k}
+                                  className="text-[11px] px-2 py-0.5 rounded-full bg-white border border-indigo-200 text-indigo-600"
+                                >
+                                  {cleanMarkdown(m)}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {(st.data.material.angles?.length ?? 0) > 0 && (
+                          <div>
+                            <div className="text-gray-500 mb-1">
+                              口播切入角度
+                            </div>
+                            <ul className="list-disc pl-4 space-y-0.5 text-gray-700">
+                              {st.data.material.angles!.map((a, k) => (
+                                <li key={k}>{cleanMarkdown(a)}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   <div>
                     <div className="font-semibold text-gray-700 mb-1">
                       📄 详细报道

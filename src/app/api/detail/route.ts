@@ -311,8 +311,11 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 严格依据搜集到的多篇权威来源生成报道
-    const report = await genReport(topic, platform || "", reportHits);
+    // 严格依据搜集到的多篇权威来源生成：①详细报道 ②口播素材卡（并行，复用同一批资料）
+    const [report, material] = await Promise.all([
+      genReport(topic, platform || "", reportHits),
+      genMaterial(topic, platform || "", reportHits),
+    ]);
 
     // 兜底：确实没搜到任何关联内容时才退回搜索页链接
     if (sites.length === 0) {
@@ -357,10 +360,10 @@ export async function POST(req: NextRequest) {
       }
     );
 
-    return NextResponse.json({ report, sites, videos });
+    return NextResponse.json({ report, sites, videos, material });
   } catch (e: any) {
     return NextResponse.json(
-      { report: `详情获取失败：${e.message}`, sites: [], videos: [] },
+      { report: `详情获取失败：${e.message}`, sites: [], videos: [], material: null },
       { status: 500 }
     );
   }
@@ -408,5 +411,69 @@ async function genReport(
     );
   } catch {
     return `关于「${topic}」的详细报道暂时无法生成，可点击下方参考链接查看更多信息。`;
+  }
+}
+
+// 口播素材卡：从同一批真实资料里提炼「能直接用进口播稿」的东西，
+// 让创作者不必逐条点开链接，就能判断这条热点值不值得做、有什么梗可用、能怎么切入。
+type Material = {
+  oneLine: string;
+  memes: string[];
+  angles: string[];
+} | null;
+
+async function genMaterial(
+  topic: string,
+  platform: string,
+  hits: SearchHit[]
+): Promise<Material> {
+  if (!OPENAI_API_KEY) return null;
+  const material = hits
+    .slice(0, 8)
+    .map((h, i) => `【来源${i + 1}｜${sourceOf(h.url)}】${h.title}｜${h.content}`.trim())
+    .filter((s) => s.length > 6)
+    .join("\n");
+  const hasMaterial = material.length > 0;
+  const from = platform ? `（来自${platform}热榜）` : "";
+  const prompt = hasMaterial
+    ? `你是短视频口播选题助手。下面是关于热点「${topic}」${from}的多篇真实资料：\n${material}\n\n请帮口播创作者快速判断这条热点能怎么做，输出一个 JSON 对象：\n{\n  "oneLine": "用一句话（40字内）说清这条热点到底在讲什么，让创作者不点开链接也能秒懂",\n  "memes": ["3-5条可以直接用进口播稿的热梗/金句/网络热词/名场面台词/争议点，要短、口语化、有传播力和记忆点；确实没有就给空数组，不要硬凑套话"],\n  "angles": ["2-3个适合做口播的切入角度，每个一句话，例如 吐槽向/共情向/科普向/反转向/蹭热度向"]\n}\n硬性要求：只依据上面资料，绝不编造；memes 要是真能戳到观众的点或有网感的表达，不要写"引发热议""值得关注"这类正确的废话；只返回 JSON，不要任何解释或多余文字。`
+    : `你是短视频口播选题助手。仅凭热点标题「${topic}」${from}（暂无更多检索资料），给口播创作者一点方向性建议，输出一个 JSON 对象：\n{\n  "oneLine": "用一句话推测这条热点大概在讲什么（40字内）",\n  "memes": [],\n  "angles": ["2-3个可能适合的口播切入角度，每个一句话"]\n}\n因为没有资料，memes 必须为空数组，不要编造具体的梗或事实。只返回 JSON，不要任何解释。`;
+  try {
+    const res = await fetchWithTimeout(
+      `${OPENAI_BASE_URL}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: OPENAI_MODEL,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      },
+      15000
+    );
+    const json = await res.json();
+    const txt: string = json.choices?.[0]?.message?.content || "";
+    const m = txt.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    const obj = JSON.parse(m[0]) as Record<string, unknown>;
+    const toStrArr = (v: unknown): string[] =>
+      Array.isArray(v)
+        ? v
+            .filter((x): x is string => typeof x === "string")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .slice(0, 6)
+        : [];
+    const oneLine =
+      typeof obj.oneLine === "string" ? obj.oneLine.trim() : "";
+    const memes = toStrArr(obj.memes);
+    const angles = toStrArr(obj.angles);
+    if (!oneLine && memes.length === 0 && angles.length === 0) return null;
+    return { oneLine, memes, angles };
+  } catch {
+    return null;
   }
 }
