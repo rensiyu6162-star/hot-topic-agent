@@ -204,7 +204,7 @@ export default function Home() {
   const [scriptType, setScriptType] = useState<ScriptType>("口播稿");
   const [scriptPlot, setScriptPlot] = useState(""); // 脚本(选填)
   const [scriptEmbed, setScriptEmbed] = useState(""); // 希望植入的梗、台词或桥段
-  const [polishing, setPolishing] = useState(false); // 润色剧情进行中
+  const [polishing, setPolishing] = useState(false); // 润色梗概进行中
   const [scriptGenerating, setScriptGenerating] = useState(false); // 一键生成进行中
   const [durationIdx, setDurationIdx] = useState(2); // 脚本时长档位，默认 1分30秒（index 2）
 
@@ -224,7 +224,7 @@ export default function Home() {
   };
 
   // 从「口播素材」卡片点击金句/角度，回填到生成脚本弹窗对应输入框：
-  // 金句 → 「希望植入的梗」（embed），角度 → 「剧情」（plot）。
+  // 金句 → 「希望植入的梗」（embed），角度 → 「梗概」（plot）。
   // 弹窗未开则自动打开一个干净的弹窗；已开则去重后追加。
   const fillScriptField = (
     field: "embed" | "plot",
@@ -255,12 +255,13 @@ export default function Home() {
     }
     const append = (prev: string, sep: string) =>
       prev.includes(clean) ? prev : prev ? `${prev}${sep}${clean}` : clean;
-    // 金句（embed）去重追加；剧情（plot）每点一次追加一次，不去重
+    // 金句（embed）去重追加；梗概（plot）每点一次追加一次，不去重
     if (field === "embed") setScriptEmbed((p) => append(p, "；"));
     else setScriptPlot((p) => (p ? `${p}\n${clean}` : clean));
   };
 
-  // 润色剧情：把用户输入的剧情想法，结合热点事件与已抓取报道，润色成一段简略的对应题材脚本，回填到脚本框
+  // 润色梗概：把用户写的想法，结合热点事件、已抓取报道与爆款库里的结构套路，
+  // 理成一段 100 字左右的梗概（只是提纲，不是成稿），回填到梗概框
   const polishPlot = async () => {
     if (!scriptModal || !scriptPlot.trim() || polishing) return;
     setPolishing(true);
@@ -275,6 +276,8 @@ export default function Home() {
           report: scriptModal.report,
           type: scriptType,
           plot: scriptPlot,
+          // 传当前锁定领域，让后端从爆款库里先收窄候选模板再按相关性挑
+          domain: selectedDomains.join("、"),
         }),
       });
       const data = await res.json();
@@ -305,6 +308,7 @@ export default function Home() {
           embed: scriptEmbed,
           duration: DURATION_STEPS[durationIdx].label,
           wordRange: DURATION_STEPS[durationIdx].words,
+          domain: selectedDomains.join("、"),
         }),
       });
       const data = await res.json();
@@ -1524,7 +1528,7 @@ export default function Home() {
                             <div className="text-gray-500 mb-1">
                               口播切入角度
                               <span className="ml-1 text-[10px] text-gray-400">
-                                （点击填入「剧情」）
+                                （点击填入「梗概」）
                               </span>
                             </div>
                             <ul className="space-y-0.5">
@@ -1539,7 +1543,7 @@ export default function Home() {
                                         material: st.data?.material,
                                       })
                                     }
-                                    title="点击填入「剧情」"
+                                    title="点击填入「梗概」"
                                     className="flex w-full items-start gap-1.5 text-left text-gray-700 rounded px-1 py-0.5 hover:bg-indigo-100 transition cursor-pointer"
                                   >
                                     <span className="text-indigo-400 leading-relaxed">
@@ -1817,11 +1821,11 @@ export default function Home() {
             </div>
             {/* SCRIPT_MODAL_REST */}
 
-            {/* 脚本（选填）+ 润色剧情 */}
+            {/* 梗概（选填）+ 润色梗概 */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <label className="text-sm font-medium text-gray-700">
-                  剧情（选填）
+                  梗概（选填）
                 </label>
                 <button
                   onClick={polishPlot}
@@ -1832,14 +1836,14 @@ export default function Home() {
                       : "border-purple-300 text-purple-600 hover:bg-purple-50"
                   }`}
                 >
-                  {polishing ? "润色中…" : "润色剧情"}
+                  {polishing ? "润色中…" : "润色梗概"}
                 </button>
               </div>
               <textarea
                 value={scriptPlot}
                 onChange={(e) => setScriptPlot(e.target.value)}
                 rows={4}
-                placeholder="支持自定义输入剧情，也可融入你的个人想法，点击生成剧情按钮，即可完成剧情润色。"
+                placeholder="用一两句话写下想怎么讲（100字左右即可），点击润色梗概可结合热点与爆款套路帮你理顺。完整口播稿由下方一键生成脚本产出。"
                 className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 focus:border-purple-400 focus:outline-none resize-y"
               />
               {(scriptModal.material?.angles?.length ?? 0) > 0 && (

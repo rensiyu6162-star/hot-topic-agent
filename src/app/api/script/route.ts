@@ -1,4 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  pickRelevantTemplates,
+  renderTemplateOutlines,
+  renderTemplates,
+} from "../_shared/templates";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_BASE_URL =
@@ -69,6 +74,9 @@ export async function POST(req: NextRequest) {
     const type: string = (body?.type || "口播稿").toString().trim();
     const duration: string = (body?.duration || "").toString().trim();
     const wordRange: string = (body?.wordRange || "").toString().trim();
+    // 领域串（可能是"影视娱乐、财经理财"这种多领域），用于从爆款库里收窄候选模板。
+    // 前端未传时按全库候选处理，仍能按相关性排出最贴的几条。
+    const domain: string = (body?.domain || "").toString().trim();
     if (!topic) {
       return NextResponse.json({ script: "", error: "缺少热点信息。" }, { status: 400 });
     }
@@ -88,33 +96,49 @@ export async function POST(req: NextRequest) {
     if (action === "polish") {
       const plot: string = (body?.plot || "").toString().trim();
       if (!plot) {
-        return NextResponse.json({ script: "", error: "请先输入剧情内容。" }, { status: 400 });
+        return NextResponse.json({ script: "", error: "请先输入梗概内容。" }, { status: 400 });
       }
-      prompt = `你是资深短视频编导。请把用户的剧情想法，结合下面的热点事件与相关报道，润色成一段【精简】的剧情梗概，不要写成完整长脚本。
+      // 梗概也调爆款库：只给「结构骨架」（选题角度/结构脉络/情绪基调/套路），
+      // 不给金句和 CTA——否则模型会顺着金句把梗概写成成稿，就和脚本重复了。
+      const outlineSamples = await pickRelevantTemplates(topic, domain, 3, callLLM);
+      const outlineRef = outlineSamples.length
+        ? `\n\n以下是与该话题套路最贴的真实爆款结构拆解（只学它们的切入角度和情节走向，不要照抄内容，也不要把样例里的措辞搬进来）：\n\n${renderTemplateOutlines(outlineSamples)}`
+        : "";
+      prompt = `你是资深短视频编导。请把用户的想法，结合下面的热点事件与相关报道，整理成一段【极简的梗概】。
 热点事件：「${topic}」${from}
-${groundBlock}
+${groundBlock}${outlineRef}
 
-用户的剧情想法：
+用户的想法：
 ${plot}
 
 要求：
-1. 输出一段精简的剧情梗概/故事线，讲清楚主要情节走向即可，篇幅短小，不必凑字数、不必贴合成片时长；
-2. 紧扣上面的热点事件，让剧情与该事件真正相关；
-3. 保留用户剧情想法里的核心创意，只做润色与结构化，不要跑题；
-4. 直接输出剧情正文，不要任何解释、前言、标题或"以下是"之类的话。`;
+1. 【篇幅硬性要求】总字数控制在 100 字左右，绝对不能超过 200 字。梗概只是一句话讲清"这条视频要怎么讲"的提纲，不是成稿；
+2. 只写核心切入角度和内容走向（怎么开头、中间讲什么、落到什么观点），不要展开成可直接照读的口播文字，不要写台词；
+3. 参考上面爆款样例的结构套路来定走向，但不要抄它们的内容和措辞；
+4. 紧扣热点事件，保留用户想法里的核心创意，不要跑题；
+5. 直接输出梗概正文，不要任何解释、前言、标题、序号或"以下是"之类的话。`;
     } else {
       const script: string = (body?.script || "").toString().trim();
       const embed: string = (body?.embed || "").toString().trim();
+      // 脚本同样调爆款库：这里给完整样例（含开头钩子/金句/CTA），让成稿有真实爆款的语感。
+      const samples = await pickRelevantTemplates(topic, domain, 5, callLLM);
+      const refBlock = samples.length
+        ? `\n\n以下是与该话题套路最贴的真实高播放口播爆款拆解样例（可能跨领域，重点学它们的开头钩子、结构节奏、金句话术、CTA 和情绪基调，用同样的套路来写——是仿其"套路"，不是抄其内容）：\n\n${renderTemplates(samples)}`
+        : "";
+      const topRaw = samples[0]?.原文摘录?.trim();
+      const rawBlock = topRaw
+        ? `\n\n下面是相关度最高那条爆款的原文开头片段，请只体会它的口语措辞和节奏感，不要抄它的内容：\n「${topRaw}」`
+        : "";
       prompt = `你是资深短视频编导。请结合下面的热点事件与相关报道，生成一个对应题材的脚本。
 热点事件：「${topic}」${from}
-${groundBlock}
-${script ? `\n参考剧情（请在此剧情基础上展开成脚本，保留其核心创意）：\n${script}` : ""}
+${groundBlock}${refBlock}${rawBlock}
+${script ? `\n参考梗概（这是本条视频的提纲，请在此基础上展开成完整脚本，保留其核心创意与走向）：\n${script}` : ""}
 ${embed ? `\n请尽量自然地把以下用户希望植入的梗、彩蛋、特定台词或名场面融入脚本中：\n${embed}` : ""}
 
 要求：
 1. ${typeGuide}
 2. ${lengthGuide}
-3. 紧扣上面的热点事件，并结合上面的参考剧情与需要植入的梗/台词/桥段；
+3. 紧扣上面的热点事件，并结合上面的参考梗概与需要植入的梗/台词/桥段；
 4. 直接输出脚本正文，不要任何解释、前言、标题或"以下是"之类的话。`;
     }
 
