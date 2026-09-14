@@ -10,6 +10,13 @@ import { fixAgeClaims } from "../../../lib/ageGuard";
 import { redactUngroundedPrices } from "../../../lib/priceGuard";
 import { biliSearchVideos, biliVideoDates } from "../../../lib/bili";
 import { queryPlan, sanitizeEntityCandidate } from "../../../lib/relevance";
+import {
+  dropNonEvidenceParts,
+  heuristicAngleKeywords,
+  looksLikeAngleSentence,
+  normalizeAngleKeywords,
+  stripAngleLead,
+} from "../../../lib/angleItem";
 
 async function fetchWithTimeout(
   url: string,
@@ -600,13 +607,23 @@ type ExpandResult = { queries: string[]; keywords: string[] };
 async function expandQueries(
   topic: string,
   core: string,
-  entity: string
+  entity: string,
+  opts: { angleLike?: boolean } = {}
 ): Promise<ExpandResult> {
   const empty: ExpandResult = { queries: [], keywords: [] };
   // 扩展同样基于剥壳短语。prompt 只给内容中立的语法规则，不写任何具体实体/案例。
   const plan = queryPlan(topic);
   const ctxHint = plan.context.length
     ? `核心短语中的每个限定成分都必须原样保留在每条 query 里：${plan.main}`
+    : "";
+  // 角度句模式（2026-09）：topic 是「内容选题角度」描述（"XX向：X月X日某平台称
+  // 「圈内黑话」，可做一期…"），不是搜索词。必须提取其中真正可检索的对象，
+  // 黑话/外号/蔑称按网友原词原样保留——2-3 字短词是它们在平台站内的唯一索引形态。
+  const angleRule = opts.angleLike
+    ? `
+0. 这句话是一条内容选题角度的【描述】，不是搜索词：里面有日期、平台导语（某平台/某帖/高赞）、编辑元话语（"向：""可做""一期"），这些全部不能进 query；
+0a. 提取角度里真正要去检索的对象：人物/作品/事件名、圈内黑话、外号、蔑称、金句原句——圈内用词必须用网友原词原样输出，哪怕只有 2-3 个字，不要翻译成书面语，也不要加修饰词把它变长；
+0b. 把长句拆成 2-5 个互相独立的短原子短语（每个只搜一个对象），不要把日期、平台名和黑话拼在同一条里；`
     : "";
   try {
     const llm = getLlm();
@@ -629,14 +646,18 @@ async function expandQueries(
               }，检索核心短语：「${plan.main}」${
                 ctxHint ? `。${ctxHint}` : ""
               }。
-规则：
+规则：${angleRule}
 1. 每条 query 必须是短语不是问句——剥掉疑问外壳（什么是/是什么/为什么/怎么看待 等）；
 2. 核心短语必须整体保留，严禁只抽其中一个泛词去搜；用户写下的每个限定成分都不能丢；
 3. 按话题本身涉及的不同侧面拆分（起因/进展/回应/影响、本义/出处/同类说法、身份/近况/争议 等中选取真实适用的，不适用的不要硬凑）。
 输出 JSON：{"queries":["q1","q2","q3","q4","q5"],"keywords":["k1","k2","k3"]}
 queries：5个搜索短语，每个≤14字${
                 entity ? `，以${entity}开头` : "，紧扣核心短语"
-              }。keywords：2-4个网友讨论该话题时的大白话短词（2-6字，可含英文/数字）。只返回JSON。`,
+              }。keywords：2-4个${
+                opts.angleLike
+                  ? "角度里的圈内原词（黑话/外号/蔑称/作品名，2-6字，原样保留不要翻译）"
+                  : "网友讨论该话题时的大白话短词（2-6字，可含英文/数字）"
+              }。只返回JSON。`,
             },
           ],
         }),
@@ -749,6 +770,7 @@ export async function POST(req: NextRequest) {
       platform,
       url,
       entity: rawEntity,
+      keywords: rawKeywords,
       llm: rawLlm,
       _evalGround,
     } = await req.json();
@@ -783,20 +805,43 @@ export async function POST(req: NextRequest) {
       typeof url === "string" && /^https?:\/\//.test(url.trim())
         ? url.trim()
         : "";
+    // 角度检索词（2026-09 显式检索契约）：前端从角度行尾的 〔搜：…〕 标记解析而来，
+    // 是"这条角度想让用户去查的对象原词"（圈内黑话/外号/作品名），与展示用的长句解耦。
+    // 旧消息没有标记时，再从 topic 的引号短语里做内容中立的启发式补词（2-3 字短黑话
+    // 过去因 <5 字被前端取词整段跳过——这里后端再兜一道）。
+    const callerKws = normalizeAngleKeywords(rawKeywords);
+    const heuristicKws = !entity
+      ? heuristicAngleKeywords(topic).filter((kw) => !callerKws.includes(kw))
+      : [];
+    const angleKws: string[] = [...callerKws, ...heuristicKws].slice(0, 5);
+    // 这句话题是不是「角度/选题描述句」（"XX向：…，可做一期…"）。检索用文本剥掉
+    // 角度标签壳，排序/成文仍用原句（长句里的描述词是 rankLoose 的精准锚点）。
+    const angleLike = !entity && looksLikeAngleSentence(topic);
+    const searchTopic = angleLike ? stripAngleLead(topic) : topic;
     // 角度原文（用于排序打分和报道/脚本生成，不用于搜索）——长句整段能帮助
-    // rankLoose 精准识别"讨论361度颜值的帖子"，但扔给 SearXNG 搜不到。
-    const angleText = entity ? topic : "";
+    // rankLoose 精准识别讨论该角度的帖子，但扔给 SearXNG 搜不到。带显式检索词的
+    // 角度句同理：检索走 angleKws，排序仍看整句。
+    const angleText = entity || callerKws.length ? topic : "";
     // 所有查询统一先拆解：用户问句剥成检索短语（"cs中的研发芯片是什么梗"→"cs 研发芯片"），
     // 热榜短标题剥不出东西原样返回；有 entity 的主体条目仍走"主体+角度关键词"老路径。
-    const plan = queryPlan(topic);
+    const plan = queryPlan(searchTopic);
     let core = cleanTopic(
-      entity
-        ? // 主体条目：检索词 = 主体 + 2-3 个短关键词（数字短语优先、其次描述词）
-          //   整段角度原文太长太窄，SearXNG 返回全是蹭词帖（详见 extractAngleKeywords）
-          `${entity} ${extractAngleKeywords(topic, entity).join(" ")}`
-            .replace(/\\s+/g, " ")
-            .trim()
-        : plan.main
+      callerKws.length
+        ? entity
+          ? // 有主体 + 显式检索词：主体配第一个原词，其余词逐路 fan-out
+            `${entity} ${callerKws[0]}`.replace(/\s+/g, " ").trim()
+          : // 无主体：前两个原词 AND（两个圈内词并列在社区平台是强鉴别组合），
+            // 每个词的裸搜路在下方 fan-out，防 AND 过严零召回
+            callerKws.slice(0, 2).join(" ")
+        : angleKws.length
+          ? angleKws.slice(0, 2).join(" ")
+          : entity
+            ? // 主体条目：检索词 = 主体 + 2-3 个短关键词（数字短语优先、其次描述词）
+              //   整段角度原文太长太窄，SearXNG 返回全是蹭词帖（详见 extractAngleKeywords）
+              `${entity} ${extractAngleKeywords(topic, entity).join(" ")}`
+                .replace(/\s+/g, " ")
+                .trim()
+            : plan.main
     );
 
     // 先做 SearXNG 检索，拿到真实资料后再据此生成报道（避免 LLM 凭空臆测）。
@@ -819,12 +864,16 @@ export async function POST(req: NextRequest) {
     //   这个路径的成本：1 次 LLM 扩展（~300 token 输出）+ 多几路 searx 搜索。
     let expandP: Promise<ExpandResult> | null;
     let chatAngleHits: SearchHit[] | null = null;
-    if (entity) {
-      // 热榜路径：并行扩展（不阻塞首轮搜索）
-      expandP = expandQueries(topic, core, entity);
+    if (entity || angleKws.length) {
+      // 热榜路径 / 角度检索词路径：并行扩展（不阻塞首轮搜索）。
+      // 角度句无主体时开 angleLike：让 LLM 把长句拆成黑话原词短查询，
+      // 首轮先用 core（原词 AND）四路并集，不等它。
+      expandP = expandQueries(topic, core, entity, {
+        angleLike: !entity && angleLike,
+      });
     } else {
       // chat 知识查询：先扩展，再用子查询搜——这是本次改动的核心价值
-      const expand = await expandQueries(topic, core, entity);
+      const expand = await expandQueries(topic, core, entity, { angleLike });
       expandP = Promise.resolve(expand);
       if (expand.queries.length > 0) {
         // 并行搜每个子查询 + 原 core；另补两路内容中立的机械变体：
@@ -907,7 +956,7 @@ export async function POST(req: NextRequest) {
     // 概念提问禁用（2026-09）："cs中的研发芯片是什么梗"里"研发芯片"是一个概念短语、
     // 不是要被剥离的实体；从半导体跑偏召回里猜出"芯片"当主体，会让整条链路越跑越偏。
     // 定义/梗/意思/由来类查询一律围绕剥壳短语检索，不猜实体。
-    if (!entity && !plan.isConceptAsk) {
+    if (!entity && !plan.isConceptAsk && !angleKws.length) {
       // 同样过句式守卫：被污染召回（如快照标题满是"已核实资料显示…"残句）里，
       // 高频词提取可能把叙事残段猜成主体名。
       const g = sanitizeEntityCandidate(guessEntity(topic, allHits));
@@ -945,8 +994,34 @@ export async function POST(req: NextRequest) {
       expandResult = await expandP;
     }
     let expandQs: string[] = expandResult?.queries || [];
+    // 角度句模式的确定性纠偏：LLM 偶尔无视"去掉模板壳"指令，扩展查询仍以
+    // "XX向：…""…可做一期…"形态出现——这种查询送进引擎只回零相关垃圾、
+    // 还会稀释 rankLoose 的锚点。内容中立地整路丢弃（原词裸搜 fan-out 不受影响）。
+    if (!entity && angleLike && expandQs.length) {
+      expandQs = expandQs.filter(
+        (q) => !/(?:向|方向)\s*[：:]|可做|这期|本期|选题角度|切入(?:口|角度)?/.test(q)
+      );
+    }
     if (entity && expandQs.length === 0) {
       expandQs = [`${entity} 近况`, `${entity} 评价`, `${entity} 争议`];
+    }
+    // 显式/启发式角度原词 → 逐词 fan-out（2026-09）：圈内黑话/外号（2-3 字）的站内
+    // 唯一索引形态就是原词本身——被主体名或大白话词一修饰，微博/贴吧/知乎站内搜索
+    // 反而零召回。所以每个原词【必发一条裸搜】；有主体时再补一条主体限定路。
+    // 下方 expandResult.keywords 的注入逻辑保持原样（那条只发主体限定路）。
+    {
+      const pushUniq = (q: string) => {
+        const x = q.replace(/\s+/g, " ").trim();
+        if (!x) return;
+        const k = x.replace(/\s+/g, "").toLowerCase();
+        if (!expandQs.some((y) => y.replace(/\s+/g, "").toLowerCase() === k)) {
+          expandQs.push(x);
+        }
+      };
+      for (const kw of angleKws) {
+        pushUniq(kw);
+        if (entity) pushUniq(`${entity} ${kw}`);
+      }
     }
     // 角度大白话短词 → 平台内短查询：微博/贴吧/知乎的站内搜索对长查询几乎零召回，
     // "zont1x 颜值""zont1x 帅"这种 2-3 词短查询才能搜出粉丝讨论帖。
@@ -1386,25 +1461,47 @@ export async function POST(req: NextRequest) {
     //     每篇都提到主体名，放行；guessEntity 猜出来的主体不算——它可能是从跑偏召回里
     //     猜中的随机新闻人物，拿它给同一批召回自证是循环论证；
     //  C. 无结构上下文（裸话题/切入句，含猜测主体落空的情况）→ 要求确定性强相关证据：
-    //     剥掉通用功能词后，至少 2 篇对实词片段打分≥3，且 1 篇≥5（约等于完整命中一个
-    //     3-4 字专有词，2-gram 散命中给不了这么高分）。"那个事后来怎么样了""你引用了哪些
-    //     网站"剥完没有鉴别性实词，必然落到这里被闸住，与问的是哪个领域无关。
+    //     至少 1 篇对原词打分≥5（完整命中长专名）或一篇覆盖≥2 个不同原词（多个圈内黑话
+    //     同时完整命中），且总共≥2 篇达到 mx≥4/cov≥2 互证。"那个事后来怎么样了""你引用了
+    //     哪些网站"剥完没有鉴别性实词，必然落到这里被闸住，与问的是哪个领域无关。
     // 闸住时不调用生成模型、不硬答一篇，直接告诉用户没查到、建议补具体主体。
-    // 强证据词只取自【用户原始话题】的实词（不碰 expandQs——扩展词是系统为放宽召回造的，
-    // 造出"后续进展"这类泛词不能反过来证明用户问的就是某件事）；剥功能词后为空 → 直接闸住。
-    const strictQs = factContentParts(cleanTopic(topic));
-    const strictScore = (h: SearchHit) => {
-      if (strictQs.length === 0) return 0;
+    // 强证据词只取自【用户原始话题/前端显式契约】（不碰 LLM 的 expandQs——扩展词是系统
+    // 为放宽召回造的，造出"后续进展"这类泛词不能反过来证明用户问的就是某件事）：
+    //  ①优先用角度检索词（〔搜：…〕契约词与引号原词都是用户/模型从原句里摘的原词）；
+    //  ②否则剥功能词，并额外去掉平台名/选题元话语/日期残片（见 dropNonEvidenceParts）；
+    // 剥完为空 → 直接闸住。
+    const strictQs = angleKws.length
+      ? angleKws
+      : dropNonEvidenceParts(factContentParts(cleanTopic(searchTopic)));
+    // 证据模型（2026-09 覆盖度升级）：旧口径"取单词条最高分、要求 1 篇≥5"对 2-3 字
+    // 圈内黑话结构性关门——3 字词满分才 4（2gram×2 + 完整 2），永远过不了 5。
+    // 单看散命中又会被"称呼/提问"这类泛词骗开。故按【多原词覆盖】判强证据：
+    // · mx：该篇对最强单个原词的分（完整长专名仍走老的 ≥5 通道）；
+    // · cov：该篇命中（≥3 分≈完整命中一个 2-3 字词）的不同原词数——同一篇同时
+    //   完整命中两个圈内词，随机蹭词帖做不到，等价于强证据；
+    // 强证据篇 mx≥5 或 cov≥2；至少 1 篇强证据 + 总共 2 篇（mx≥4 或 cov≥2）互证。
+    const docEvidence = (h: SearchHit) => {
       const txt = `${h.title} ${h.content}`;
-      return Math.max(...strictQs.map((q) => relevanceScore(txt, q)));
+      let mx = 0;
+      let cov = 0;
+      for (const q of strictQs) {
+        const s = relevanceScore(txt, q);
+        if (s >= 3) cov += 1;
+        if (s > mx) mx = s;
+      }
+      return { mx, cov };
     };
-    const factScores = reportHits.map((h) =>
-      entityFromCaller ? baseScore(h) : strictScore(h)
-    );
+    const factEvidences = reportHits.map((h) => ({
+      h,
+      ...(entityFromCaller
+        ? { mx: baseScore(h), cov: 0 }
+        : docEvidence(h)),
+    }));
+    const factScores = factEvidences.map((e) => e.mx);
     const factStrong =
       strictQs.length > 0 &&
-      factScores.filter((s) => s >= 3).length >= 2 &&
-      factScores.some((s) => s >= 5);
+      factEvidences.some((e) => e.mx >= 5 || e.cov >= 2) &&
+      factEvidences.filter((e) => e.mx >= 4 || e.cov >= 2).length >= 2;
     //  A. 应用内结构化入口：热榜单条点入（带 platform 且有平台核心来源）或带原报道链接 →
     //     事实确定，放行。注意无 platform 时 groundHits 只是 SearXNG 召回的前两条、
     //     不是"平台核心来源"，不能作为证据——否则任何垃圾检索都能靠它自证放行。

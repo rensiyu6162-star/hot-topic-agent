@@ -3,7 +3,9 @@
 // 任何失败一律静默降级（知识库是增强项，绝不能拖垮主链路）。
 
 const RAG_URL = process.env.RAG_URL || "http://127.0.0.1:8091";
-const DEFAULT_TIMEOUT_MS = 45000;
+// 10s 足够：rerank 实测 1-3s、embedding 15 条约 1-2s；旧值 45s 在 RAG 服务卡死时
+// 会让挂着的请求白白占资源太久（知识库只是增强项，快速失败降级为空块才对）。
+const DEFAULT_TIMEOUT_MS = 10000;
 
 // 知识库语料的十个领域（与建库 meta.category 完全一致，用于精确过滤）
 export const KB_CATEGORIES = [
@@ -29,6 +31,10 @@ export interface RetrieveOptions {
   minScore?: number;
   category?: string;
   timeoutMs?: number;
+  // 按 meta.source 排除命中。写稿语感参考传 ["hot-history"]：定时任务沉淀的
+  // 自生成稿件只许用于选题去重/问答检索，不许回灌进"真实爆款语感"块，否则模型
+  // 会反复模仿自己的旧输出形成自蒸馏（早期 prompt 的风格缺陷被强化固化）。
+  excludeSources?: string[];
 }
 
 export async function retrieveKnowledge(
@@ -54,12 +60,31 @@ export async function retrieveKnowledge(
     if (!res.ok) return [];
     const data = (await res.json()) as { results?: RagHit[] };
     const min = opts.minScore ?? 0.3;
-    return (data.results ?? []).filter((r) => typeof r.score === "number" && r.score >= min);
+    const excluded = new Set(opts.excludeSources ?? []);
+    return (data.results ?? []).filter(
+      (r) =>
+        typeof r.score === "number" &&
+        r.score >= min &&
+        !(r.meta?.source && excluded.has(r.meta.source))
+    );
   } catch {
     return [];
   } finally {
     clearTimeout(timer);
   }
+}
+
+// 写稿语感库专用检索：只保留人工 ASR 真稿（source=kb462）等"外部语料"，
+// 排除 hot-history 自生成沉淀。两个写稿入口统一走它，不再各传各的参数。
+export function retrieveVoiceCorpus(
+  query: string,
+  opts: Pick<RetrieveOptions, "topK" | "minScore"> = {}
+): Promise<RagHit[]> {
+  return retrieveKnowledge(query, {
+    topK: opts.topK ?? 3,
+    minScore: opts.minScore ?? 0.35,
+    excludeSources: ["hot-history"],
+  });
 }
 
 // 拼成给 LLM 的参考块。定位：真实爆款口播稿语料——学钩子/节奏/结构，不抄内容。

@@ -10,9 +10,11 @@ import {
   heuristicIntent,
   OPINION_FACT_BOUNDARY,
   INFO_NARRATIVE_RULE,
+  buildInfoFactTail,
+  HOOK_QUOTE_RULE,
   type ScriptIntent,
 } from "../_shared/scriptIntent";
-import { retrieveKnowledge, formatKnowledge } from "../../../lib/rag";
+import { retrieveVoiceCorpus, formatKnowledge } from "../../../lib/rag";
 import { searxSearchUnion } from "../../../lib/searx";
 import { crawlerSearch } from "../../../lib/crawler";
 import {
@@ -26,6 +28,7 @@ import {
 import { queryPlan, sanitizeEntityCandidate } from "../../../lib/relevance";
 import { fixAgeClaims } from "../../../lib/ageGuard";
 import { redactUngroundedPrices } from "../../../lib/priceGuard";
+import { guardQuotes } from "../../../lib/quoteGuard";
 import { fixNumberDrift } from "../../../lib/numberGuard";
 import { getLlm, isInternalRequest, llmChatJson, llmErrorAction, resolveRequestLlm, setRequestLlm } from "../../../lib/llm";
 
@@ -153,6 +156,57 @@ function dropUngroundedDurations(text: string, material: string): string {
     .replace(/^[，,。．；;\s]+/gm, "");
 }
 
+// 微超红线的确定性收口（2026-09 评测实证）：30 秒档 133/138 字超红线几个字时，LLM
+// "再删一点"指令常整段重写甚至越压越长（micro 实测压不动），白花一次调用还增加波动。
+// 微超时优先纯代码手术：只删句中【话语标记/填充成分】——删掉不损失任何事实信息与论点
+// 结构；够不到红线就返回 null，交回给 LLM 微压（不硬凑）。观点稿/资讯稿均可用：
+// 词表全部是语篇衔接成分，不动论点词、数字、人名、引语。每条 [正则, 替换串] 必须保留
+// 前导标点（"A，说白了，B"→"A，B"），不能把两个小句直接焊死。
+const FILLER_TOKENS: [RegExp, string][] = [
+  [/(^|[，,。！？\s])(?:话说回来|我跟你讲|你还别说|不得不说|众所周知|总而言之|归根结底|换句话说|说白了|讲真的?|有一说一)[，,]?/g, "$1"],
+  // 立场口头禅（删后判断句直接开口，锋芒不减）："我偏说：不是A是B"→"不是A是B"
+  [/(^|[，,。！？\s])我偏说[：:]?/g, "$1"],
+  [/(?:事实上|实际上|老实说|坦白讲|客观来讲)[，,]/g, ""],
+  [/(?:在我看来|个人觉得|我一直觉得|你有没有想过|你想想看|大家要知道|我们都知道|你要知道|我告诉你)[，,]?/g, ""],
+  // 反问前缀只在小句开头删，避开"坚持到底/究其究竟"等词内命中
+  [/(^|[，,。！？\s])(?:到底|究竟)(?=[^，,。！？\s])/g, "$1"],
+  // 否定前的纯强化副词："根本没给→没给""压根不是→不是"，命题含义不变
+  [/(?:压根|根本|丝毫)(?=[没无未不非])/g, ""],
+  // 让步发语词："对，但…/是的，不过…/没错，因为…"删发语保留反驳，语义不变
+  [/(^|[。．！？!?\s])(?:对|是的|没错|有道理)[，,](?=但|可|不过|然而|因为)/g, "$1"],
+  [/[，,](?:其实|反正|总之|当然)[，,]/g, "，"],
+  // 副词"连…都/也"的"连"："女人连入场资格都没有"→"女人入场资格都没有"，语气略损、
+  // 命题不变。两道保险防词内误删：①后面 12 字内必须有"都/也"呼应（连锁/连接句没有）；
+  // ②"连锁/连接/连续/连任/连夜/连累…"成词语素直接排除。
+  [/连(?![锁接续队长任夜声载带累绵亘])(?=[^，,。！？!?]{1,12}[都也])/g, ""],
+  // 小句开头的"同样"："同样搞陷害，BL喊…"→"搞陷害，BL喊…"对比义由后文两个分句承载
+  [/(^|[，,。！？\s])同样(?=[^，,。！？\s])/g, "$1"],
+  // "问这话的人→问话的人、说这话→说话"：指示代词"这"在此类动词宾语里零信息
+  [/(问|说|听|讲)这话/g, "$1话"],
+  // 递进副词"甚至"："北京队甚至做好了放人准备"→"北京队做好了放人准备"，事实不变
+  [/甚至/g, ""],
+  // "记者去问近况→记者问近况"：趋向义在这类言说动词前是虚的
+  [/去问/g, "问"],
+];
+
+function microCutFillers(text: string, limit: number, floor: number): string | null {
+  if (!text) return null;
+  let cur = text;
+  // 每个词表轮一遍；每删一次就检查，达标立即收，不多删。
+  for (const [re, rep] of FILLER_TOKENS) {
+    for (const m of [...cur.matchAll(new RegExp(re.source, "g"))]) {
+      if (cur.replace(/\s/g, "").length <= limit) break;
+      const next = cur.replace(m[0], rep).replace(/[，,]{2,}/g, "，");
+      if (!next.trim() || next === cur) continue;
+      cur = next;
+    }
+    if (cur.replace(/\s/g, "").length <= limit) break;
+  }
+  const chars = cur.replace(/\s/g, "").length;
+  if (chars > limit || chars < floor) return null;
+  return cur;
+}
+
 // 资讯稿超长机器收尾（2026-09 评测实证）：LLM 两轮压缩后仍可能超红线 10-20 字，
 // 且往往只差在结尾多了一段【无数字、无问号】的纯行动呼吁/重复总结（如"申领之前先看
 // 三件事……"）。观点稿绝不调用（金句反问是核心结构件）。从尾段向前逐段删，删到
@@ -174,21 +228,26 @@ function trimOverlongInfoTail(text: string, limit: number): string {
 
 // 首句断句（2026-09 评测实证）：模型偶尔把钩子写成 30-40 字的长复合句
 // （"周琦没进14人大名单，8月21日名单内线是……"），prompt 写了≤20字仍偶发。
-// 出口纯文本手术：第一句（首个句末标点前）超 24 字且内部 8-24 字位置有逗号时，
-// 把第一个逗号改成句号——口播上本就该在此停顿，不改词不删信息。只动首句一处。
+// 出口纯文本手术：第一句（首个句末标点前）超 24 字且内部 6-24 字位置有逗号/破折号时，
+// 把第一个分隔点改成句号——口播上本就该在此停顿，不改词不删信息。只动首句一处。
+// 下限 6（曾实测"每个月工资到手，"7字位逗号未切导致 39 字长句）：6-7 字的引导小句
+// （"工资到手，""名单一出，"）本身就是完整呼吸句；切点后剩余部分不足 6 字则不动。
 function breakLongFirstSentence(text: string): string {
   if (!text) return text;
   const firstPara = text.split(/\n/)[0];
   const m = firstPara.match(/^[^。．！？!?]{25,}[。．！？!?]/);
   if (!m) return text;
   const head = m[0];
-  const comma = head.match(/^(.{8,24}?)[，,]/);
-  if (!comma) return text;
-  const after = head.slice(comma[0].length);
+  const sep = head.match(/^(.{6,24}?)([，,]|——|—|：|:)/);
+  if (!sep) return text;
+  const leadLen = sep[1].length;
+  const sepLen = sep[2].length;
+  const after = head.slice(leadLen + sepLen);
   if (after.replace(/[。．！？!?\s]/g, "").length < 6) return text;
-  const idx = comma[0].length - 1;
-  // head 从文本 0 位置开始，逗号偏移即全文偏移（首段即开头）
-  return text.slice(0, idx) + "。" + text.slice(idx + 1);
+  // 冒号切点后若直接是引语（"X说：「…」"），切开会得到秃句"X说。"——不切。
+  if ((sep[2] === "：" || sep[2] === ":") && /^[“"'「『]/.test(after)) return text;
+  // head 从文本 0 位置开始，偏移即全文偏移（首段即开头）
+  return text.slice(0, leadLen) + "。" + text.slice(leadLen + sepLen);
 }
 
 // 万能尾巴修剪：模型常在已写出真实提问后再赘一句"你觉得呢？/评论区聊聊"。
@@ -219,12 +278,21 @@ function joinShatteredLines(text: string): string {
 }
 
 // 口播稿后处理统一入口：年龄守卫之外的所有确定性清洗都走这里，主稿与扩写稿同口径。
-function applyScriptGuards(script: string, factSource: string): string {
+// 返回 hookDropped：本轮是否删除过钩子位伪引语——调用方据此决定要不要按档下限触发展写。
+function applyScriptGuards(
+  script: string,
+  factSource: string
+): { text: string; hookDropped: boolean } {
   let out = fixNumberDrift(script, factSource);
   out = redactUngroundedPrices(out, factSource);
   out = dropUngroundedHistory(out, factSource);
   out = dropUngroundedDurations(out, factSource);
   out = dropDegenerateClauses(out);
+  // 伪引语守卫（2026-09 健身房案）：钩子位无出处直接引语整段删、正文位去引号降级。
+  // 必须在 AI 腔黑名单替换【之前】跑——黑名单词若出现在引号内被替换，会破坏引语原貌
+  // 导致出处误判；也必须在断句之前跑（先拿掉伪造钩子，再对真正的首句做断句手术）。
+  const quoteRes = guardQuotes(out, factSource);
+  out = quoteRes.text;
   out = out
     .replace(
       /你有没有发现|你发现没(有)?|但你以为这就完了[??]?|听懂没[??]?|注意到了吗[??]?|说白了|我告诉你/g,
@@ -238,13 +306,14 @@ function applyScriptGuards(script: string, factSource: string): string {
   out = joinShatteredLines(out);
   out = breakLongFirstSentence(out);
   out = trimGenericTail(out);
-  return out
+  const text = out
     .replace(/\n{3,}/g, "\n\n")
     // 句末标点叠床架屋（2026-09 实测观点稿结尾"你怎么选？。"）：问号/叹号已结束句子，
     // 后面的句号删掉；重复句点归一。纯出口标点清洗，不动文字。
     .replace(/([？?!！])[。.．]+/g, "$1")
     .replace(/。{2,}/g, "。")
     .trim();
+  return { text, hookDropped: quoteRes.dropped > 0 };
 }
 
 // 空资料兜底：脚本需要事实依据，report 为空时先联网检索话题，把真实摘要作为依据注入，
@@ -506,6 +575,7 @@ export async function POST(req: NextRequest) {
     // 直达率好但违背"prompt只说标准字数"。中位字数=单一具体目标，最直观。
     // capWords 压缩线仅作代码侧兜底（最低档上限120%，其余110%），prompt 不提。
     const upper = wrMatch ? Number(wrMatch[2]) : 0;
+    const lower = wrMatch ? Number(wrMatch[1]) : 0;
     let midWords = wrMatch
       ? Math.round((Number(wrMatch[1]) + upper) / 2)
       : 0;
@@ -697,12 +767,15 @@ export async function POST(req: NextRequest) {
           }\n结构只决定"怎么讲"，所有事实仍然只能出自上面的资料；指定钩子若在资料里找不到对应素材，就退回用数字事实钩，不许为套结构编素材。`
         : "";
 
-    // 事实依据组装：报道（若有）在前，原文摘录/快照随后；报道缺失但有抓取资料也成立。
+    // 事实依据组装：信任级必须显式分层（2026-09 链路审计）——report 是 LLM 看搜索摘要
+    // 二次综合的"概括"，不是原文；若不标注，下游写稿会把概括里可能失真的数字/引语当权威
+    // 抄写。规则：综述只用于快速理解，具体数字/引语以原文摘录（其次快照）为唯一出处。
+    const REPORT_TAG = `【事件综述·服务端基于多篇搜索摘要的二次概括（非原文）】以下内容只用于快速理解事件脉络；凡涉及具体数字、日期、人名机构名、引语，都必须以下方原文摘录/快照里的原句为准，综述里写了但下方资料找不到原句的，不许写进成稿：`;
     let groundBlock = "";
     if (realReport && docsBlock) {
-      groundBlock = `该热点事件网上相关的高热度报道与原文资料如下，请以此为事实依据，不要编造资料之外的事实。${freshAnchor}\n${realReport}\n\n${docsBlock}`;
+      groundBlock = `该热点事件的事实依据如下，请以此为据，不要编造资料之外的事实。${freshAnchor}\n${REPORT_TAG}\n${realReport}\n\n${docsBlock}`;
     } else if (realReport) {
-      groundBlock = `该热点事件网上相关的高热度报道如下，请以此为事实依据，不要编造报道之外的事实。${freshAnchor}\n${realReport}`;
+      groundBlock = `该热点事件网上相关的高热度报道如下，请以此为事实依据，不要编造报道之外的事实。${freshAnchor}\n${REPORT_TAG}\n${realReport}`;
     } else if (docsBlock) {
       groundBlock = `该热点事件网上相关的高热度资料如下（含服务端实时抓取的文章原文），请以此为事实依据，不要编造资料之外的事实；涉及具体人物/机构/数据等容易记错的细节，【只能】写资料支撑的内容。${freshAnchor}\n${docsBlock}`;
     } else {
@@ -863,7 +936,7 @@ ${plot}
       const [samples, ragHits] = await Promise.all([
         pickRelevantTemplates(topic, domain, 5, callLLM),
         ragQuery.length >= 4
-          ? retrieveKnowledge(ragQuery, { topK: 3, minScore: 0.35 }).catch(() => [])
+          ? retrieveVoiceCorpus(ragQuery, { topK: 3, minScore: 0.35 }).catch(() => [])
           : Promise.resolve([]),
       ]);
       ragHitsCount = ragHits.length;
@@ -887,14 +960,8 @@ ${plot}
       // 在模型遵循度最高的末尾再压一道具体动作（数字/年份/时长逐个回对资料，找不到就删句）。
       // 信息块预算（同月实测：育儿补贴案两轮压缩都到 874 字压不动——模型生成时塞了
       // 国家/省/流程/4城加码/辟谣 5 大块，事后压缩舍不得整块砍。预算必须前置到生成阶段）：
-      const factTail = opinionMode
-        ? ""
-        : `\n【事实终检·交稿前必做】把稿中每一个数字、百分比、年份、时长（X年/X个月/X天）、人名机构名、平台榜单名、引语，回到上面资料里逐条找原句；找不到原句的那一句立刻整句删掉，不许换个模糊说法留下。` +
-          `\n时态不许反：资料里"将于/刚开始/进行中"的事件，绝不能写成"已结束/刚结束/落幕"；今天是${new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)}（北京时间），按资料日期推断事件处于哪个阶段就写哪个阶段，资料没说结束就不许写结束。` +
-          `\n引语不许造假：引号内或冒号后的直接引语必须是资料原句；只拿到大意时一律写成转述（"他表示/公开表态大意是"），禁止给转述配上引号、禁止替人物造句。` +
-          (midWords
-            ? `\n【信息块预算·硬约束】全稿约${midWords}字最多讲${midWords < 300 ? 3 : 4}个信息块：同类并列（各地政策/各家公司产品/多名网友反应）最多写2个例子；操作流程只留用户最需要的第一步，其余一句话带过或不写；超出预算的信息块【整块不写】，不许靠缩短句子硬塞。`
-            : "");
+      // 终检/时态/引语三块纪律与 chat 写稿入口共用 buildInfoFactTail，禁止两处各写各的。
+      const factTail = opinionMode ? "" : buildInfoFactTail(midWords);
       prompt = opinionMode
         ? `你是靠"观点锐评"涨粉的头部短视频口播博主。观众刷到你，不是来听新闻复述，是来听你把一个有争议的判断掰开揉碎讲透。请基于【用户给出的中心论点】，写一篇可以直接对着镜头讲的观点评论口播稿。
 
@@ -912,7 +979,7 @@ ${embedMaterial ? `\n可以自然用上的用户指定梗/台词（用不上别�
             ? "本篇较长，五个部分一个都不能省"
             : "短稿可把第4部分并入第3部分"
         }；整篇直接成段口播，2-4个自然段，不要写小标题、序号或分镜提示）：
-1. 开头3秒：直接甩判断或反常识断言，第一句（到第一个句号/问号/感叹号为止）不超过20字，第一句就让人停下来。严禁自我介绍、"今天聊聊"、"先问大家一个问题"。
+1. 开头3秒：直接甩判断或反常识断言，第一句（到第一个句号/问号/感叹号为止）不超过20字，第一句就让人停下来。严禁自我介绍、"今天聊聊"、"先问大家一个问题"。${HOOK_QUOTE_RULE}；
 2. 立靶子：先讲清流行看法或对立面怎么说，再亮出上面的中心论点——冲突本身就是留人点。
 3. 递进论证（占全稿一半以上篇幅）：${
           effectiveReqSec >= 85 ? "3" : "2"
@@ -942,7 +1009,7 @@ ${embedMaterial ? `\n请尽量自然地把以下用户希望植入的梗、彩�
 2. ${toneGuide}
 3. ${lengthGuide}
 4. 紧扣上面的热点事件，并结合上面的参考梗概与需要植入的梗/台词/桥段；
-5. 网感硬要求：全篇短句口语化、句子短到一屏字幕能放下即可（但成段输出，换行只在自然段之间，不许一句一行）；开头3秒必须有炸点钩子（用悬念/反差/震惊事实抓住注意力）；不要说教不要书面语，像朋友聊天一样分享；严禁"今天给大家讲讲""哈喽大家好"这种平淡开头；
+5. 网感硬要求：全篇短句口语化、句子短到一屏字幕能放下即可（但成段输出，换行只在自然段之间，不许一句一行）；开头3秒必须有炸点钩子（用悬念/反差/震惊事实抓住注意力）；${HOOK_QUOTE_RULE}；不要说教不要书面语，像朋友聊天一样分享；严禁"今天给大家讲讲""哈喽大家好"这种平淡开头；
 6. 【叙事组织】
 ${INFO_NARRATIVE_RULE}
 7. 【事实纪律·零虚构】稿中所有具体事实（数字/价格/降幅/日期/人名/机构名/引语）必须能在上面资料里找到原句依据，资料没写的【一个字都不许补】：
@@ -1017,6 +1084,18 @@ ${INFO_NARRATIVE_RULE}
           let nextChars = next.replace(/\s/g, "").length;
           // 软压后仍超【产品红线】才二次调用；capWords~redLine 之间是 20% 容忍区，直接收。
           if (nextChars > redLine) {
+            // 微超（≤8字）先上零成本确定性删词：实测 LLM 对"再删几个字"常常整段重写
+            // 甚至压不动（133/138 反复出现）。删词能直接达标就不花这次调用。
+            let detHandled = false;
+            if (nextChars - redLine <= 8) {
+              const det = microCutFillers(next, redLine, Math.round(redLine * 0.8));
+              if (det) {
+                next = det;
+                nextChars = det.replace(/\s/g, "").length;
+                detHandled = true;
+              }
+            }
+            if (!detHandled) {
             // 仅微超红线（≤8字）走填充词微压，避免把好好的短稿整块砍崩；大超才硬删
             const mode = nextChars - redLine <= 8 ? "micro" : "hard";
             const secondTarget = mode === "micro" ? redLine : target;
@@ -1026,17 +1105,24 @@ ${INFO_NARRATIVE_RULE}
             const floor = mode === "micro" ? Math.round(redLine * 0.8) : Math.round(target * 0.5);
             const adoptable = (n: number) => n < nextChars && n >= floor;
             if (mode === "micro" && !(second && adoptable(secondChars) && secondChars <= redLine)) {
-              // micro 没把住（模型对"只删词"指令常重写全文）：换字数驱动指令再试一次，
-              // 仍是微调不动结构；两次微压总共只在"超线≤8字"路径触发，常规长稿不受影响
-              const retry = await squeezeOnce(next, nextChars, redLine, "micro2");
-              const retryChars = retry.replace(/\s/g, "").length;
-              if (retry && retryChars < nextChars && retryChars >= floor && retryChars <= redLine) {
-                second = retry;
-                secondChars = retryChars;
+              // micro 没把住（模型对"只删词"指令常重写全文）：先试确定性删词，再不行
+              // 换字数驱动指令最后试一次；两次微压总共只在"超线≤8字"路径触发
+              const det = microCutFillers(next, redLine, floor);
+              if (det) {
+                second = det;
+                secondChars = det.replace(/\s/g, "").length;
+              } else {
+                const retry = await squeezeOnce(next, nextChars, redLine, "micro2");
+                const retryChars = retry.replace(/\s/g, "").length;
+                if (retry && retryChars < nextChars && retryChars >= floor && retryChars <= redLine) {
+                  second = retry;
+                  secondChars = retryChars;
+                }
               }
             }
             if (second && adoptable(secondChars)) {
               next = second;
+            }
             }
           }
           finalScript = next;
@@ -1056,6 +1142,21 @@ ${INFO_NARRATIVE_RULE}
       finalScript = trimOverlongInfoTail(finalScript, redLine);
       if (finalScript.replace(/\s/g, "").length < before) trimmed = true;
     }
+    // 所有文体通用的最后保险：LLM 压缩全部走完仍微超红线（≤8字）时，纯代码删话语
+    // 标记词。观点稿 30 秒档曾两轮 LLM 都压不动（138 字），填充词删除不动任何论点与
+    // 事实，是比"超线稿直接返回"更安全的选择。
+    if (
+      action !== "polish" &&
+      redLine > 0 &&
+      finalScript.replace(/\s/g, "").length - redLine <= 8 &&
+      finalScript.replace(/\s/g, "").length > redLine
+    ) {
+      const det = microCutFillers(finalScript, redLine, Math.round(redLine * 0.8));
+      if (det) {
+        finalScript = det;
+        trimmed = true;
+      }
+    }
     // 年龄守卫（纯代码零token）：修复"当前年龄"旧记忆回潮（如人物已19岁稿里写18岁）。
     // 只动语法明确断言当前年龄的句子（今年/刚满/才X岁…）；过去事件年龄（"16岁出道"）
     // 与资料过去叙事中出现过的数字一律不碰；资料无出生日期则整体不生效。
@@ -1069,12 +1170,24 @@ ${INFO_NARRATIVE_RULE}
     finalScript = ageRes.text;
     // 确定性事实守卫（纯代码零token，2026-09 评测实证）：AI腔清除 + 价格脱敏 +
     // 百分比漂移修正（98%→99%）+ 无依据历史对比句剔除（"去年这时候…"）。
-    finalScript = applyScriptGuards(finalScript, groundBlock);
+    const guardResMain = applyScriptGuards(finalScript, groundBlock);
+    finalScript = guardResMain.text;
     // 过短兜底（2026-09 评测实证）：generate 分支偶发只吐两句话（实测成稿仅 68 字，
     // 与"超长压缩"对称的失配）。对【短于目标字数60%】的成稿重发一次原 prompt+扩写提醒
     // （最多一轮），要求在不引入任何资料外事实的前提下把背景/反应/互动写完整；polish
     // 分支本身要求短，不触发。
-    if (action !== "polish" && finalScript.replace(/\s/g, "").length < minWords) {
+    // 钩子伪引语守卫删过钩子时，减法可能把原本压线的稿子削到档下限以下（健身房案实测
+    // 152<160），此时按【档位下限】而非常规 60% 线触发同一套扩写兜底。
+    const shortFloor = guardResMain.hookDropped && lower ? lower : minWords;
+    // 评测观测：过短扩写分支的决策痕迹（请求/产出字数、是否采用、守卫是否再次删钩子）
+    let expandTrace: {
+      shortN: number;
+      expN: number;
+      adopted: boolean;
+      finalN?: number;
+      hookDroppedAgain?: boolean;
+    } | null = null;
+    if (action !== "polish" && finalScript.replace(/\s/g, "").length < shortFloor) {
       const shortN = finalScript.replace(/\s/g, "").length;
       // 观点稿的"短"是论证没展开，扩写要补的是论证层次而不是事实细节；
       // 资讯稿维持原口径（补背景/反应，不许补资料外事实）。
@@ -1090,15 +1203,32 @@ ${INFO_NARRATIVE_RULE}
           `保留上一版已写的事实与钩子，严格依据上面资料把事件背景、关键信息、各方反应和结尾互动写完整，` +
           `字数必须达到上面第3条的要求。事实纪律不变：资料里没有的数字、价格、日期、动作细节、对比` +
           `一个字都不许补。直接输出正文。`;
-      const expanded = await callLLM(`${prompt}\n\n${expandHint}`).catch(() => "");
-      if (expanded && expanded.replace(/\s/g, "").length > shortN + 50) {
-        finalScript = applyScriptGuards(
+      const hookRewriteHint = guardResMain.hookDropped
+        ? `另外，上一版开头引用了资料里没有原句的话已被打回：这一版开头直接用事实或判断，` +
+          `不要给资料里的间接陈述加引号、不要冒充当事人原话。`
+        : "";
+      const expanded = await callLLM(`${prompt}\n\n${expandHint}${hookRewriteHint}`).catch(
+        () => ""
+      );
+      const expN = expanded ? expanded.replace(/\s/g, "").length : 0;
+      if (expanded && expN > shortN + 50) {
+        const g2 = applyScriptGuards(
           fixAgeClaims(
             [realReport, ...facts, ...memes, birthBlock].filter(Boolean).join("\n"),
             expanded
           ).text,
           groundBlock
         );
+        finalScript = g2.text;
+        expandTrace = {
+          shortN,
+          expN,
+          adopted: true,
+          finalN: finalScript.replace(/\s/g, "").length,
+          hookDroppedAgain: g2.hookDropped,
+        };
+      } else {
+        expandTrace = { shortN, expN, adopted: false };
       }
     }
     return NextResponse.json({
@@ -1138,6 +1268,7 @@ ${INFO_NARRATIVE_RULE}
                 cn: d.cn,
               })),
             },
+            expandTrace,
           }
         : {}),
     });

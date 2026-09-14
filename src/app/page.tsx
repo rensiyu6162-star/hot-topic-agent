@@ -8,6 +8,11 @@ import {
   type LlmOverride,
 } from "../lib/llm-providers";
 import { extractEntityFromOverview } from "../lib/relevance";
+import {
+  heuristicAngleKeywords,
+  parseAngleMarker,
+  stripAngleLead,
+} from "../lib/angleItem";
 
 interface Message {
   role: "user" | "assistant";
@@ -2687,7 +2692,8 @@ export default function Home() {
     topic: string,
     platform = "",
     url = "",
-    entity = ""
+    entity = "",
+    keywords: string[] = []
   ) => {
     const cur = details[key];
     if (cur && cur.data) {
@@ -2695,7 +2701,7 @@ export default function Home() {
       return;
     }
     if (cur && cur.loading) return;
-    await loadDetail(key, topic, platform, url, entity);
+    await loadDetail(key, topic, platform, url, entity, keywords);
   };
 
   // 实际拉取详情（首次点击与「重试」共用）：失败时置 error 标记，供 UI 显示重试按钮
@@ -2704,7 +2710,8 @@ export default function Home() {
     topic: string,
     platform = "",
     url = "",
-    entity = ""
+    entity = "",
+    keywords: string[] = []
   ) => {
     updateDetails((p) => ({
       ...p,
@@ -2714,7 +2721,14 @@ export default function Home() {
       const res = await fetch("/api/detail", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, platform, url, entity, llm: llmPayload() }),
+        body: JSON.stringify({
+          topic,
+          platform,
+          url,
+          entity,
+          keywords,
+          llm: llmPayload(),
+        }),
       });
       const data = (await res.json()) as DetailData;
       // 服务端 500 或返回"详情获取失败…"这类兜底文案，同样按失败处理，展示重试按钮
@@ -3216,7 +3230,7 @@ export default function Home() {
       const suggestionItem = !looksLikeHotItem && (dirBullet || capsuleChip);
       // 方向区条目行的 emoji（🔥💰⚡ 等）是模型惯性加的装饰，与领域胶囊混在一起显得莫名其妙——
       // 渲染前确定性剥掉（提示词禁令对模型抑制不稳定，前端兜底；只剥方向区条目，热搜条目标题不动）
-      const displayLine = dirBullet
+      const strippedLine = dirBullet
         ? line
             .replace(
               /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}\u{20E3}]/gu,
@@ -3225,18 +3239,34 @@ export default function Home() {
             .replace(/[ \t]{2,}/g, " ")
             .trimEnd()
         : line;
+      // 显式检索契约（2026-09）：角度行尾的 〔搜：词1 词2 词3〕 是给检索用的机器标记，
+      // 绝不能显示给用户，也不能带着它去检索——这里剥成展示文本 + 检索词两部分。
+      const angleMarker = parseAngleMarker(strippedLine);
+      const displayLine = angleMarker.display;
       let tagTopic = "";
+      let tagKeywords: string[] = angleMarker.keywords;
       if (suggestionItem) {
-        const quoted = displayLine.match(/[「“"]([^」”"]{2,30})[」”"]/);
-        const baseTopic = stripLead(cleanMarkdown(displayLine))
-          .replace(/【[^】]*】/g, "")
-          .replace(/^\s*-\s*/, "")
-          .replace(/[；;。，,]\s*$/, "");
-        // 引号主题太短（如"青春饭"只有3字）时检索价值不如整句，回退用整句
-        tagTopic = (quoted && quoted[1].length >= 5 ? quoted[1] : baseTopic)
-          .replace(/[*#`]+/g, "")
-          .trim()
-          .slice(0, 60);
+        const baseTopic = stripAngleLead(
+          stripLead(cleanMarkdown(displayLine))
+            .replace(/【[^】]*】/g, "")
+            .replace(/^\s*-\s*/, "")
+            .replace(/[；;。，,]\s*$/, "")
+        );
+        if (tagKeywords.length) {
+          // 契约路径：检索词显式随请求发出（后端 core/fan-out/事实门都用它们）；
+          // topic 仍传剥壳整句——后端排序与成文需要整句锚点，检索不直接用它。
+          tagTopic = baseTopic;
+        } else {
+          // 旧消息兜底：引号短语全收——除了 ≥5 字的长引句，2-3 字圈内黑话原词
+          //（蔑称/外号）也要逐词带给后端 fan-out，不能再因太短被整句长查询埋没。
+          const allQuoted = heuristicAngleKeywords(displayLine);
+          const longQuoted = allQuoted.find((q) => q.length >= 5);
+          tagTopic = longQuoted || baseTopic;
+          tagKeywords = allQuoted.filter(
+            (q) => q.replace(/\s+/g, "") !== tagTopic.replace(/\s+/g, "")
+          );
+        }
+        tagTopic = tagTopic.replace(/[*#`]+/g, "").trim().slice(0, 60);
       }
       if (!looksLikeHotItem && !(suggestionItem && tagTopic.length >= 4)) {
         return (
@@ -3283,7 +3313,16 @@ export default function Home() {
             {rowBody}
             {!suggestionItem && tagSpans("ml-1.5")}
             <button
-              onClick={() => toggleDetail(key, topic, platform, url, suggestionItem ? entityName : "")}
+              onClick={() =>
+                toggleDetail(
+                  key,
+                  topic,
+                  platform,
+                  url,
+                  suggestionItem ? entityName : "",
+                  suggestionItem ? tagKeywords : []
+                )
+              }
               className={`align-middle ml-2 whitespace-nowrap text-[11px] leading-none px-2 py-1 rounded-full border transition ${
                 st
                   ? "opacity-100 border-emerald-300 text-emerald-600 hover:bg-emerald-50"
