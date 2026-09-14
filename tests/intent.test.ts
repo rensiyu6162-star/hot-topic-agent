@@ -250,3 +250,112 @@ describe("邮戳", () => {
     expect(d.turnType).toBe("other");
   });
 });
+
+describe("intent 白名单（非法值按分类失败兜底）", () => {
+  it("intent 带空格/大写（\"Hot \"）→ clsOk=false，强动作词兜底仍判 hot", async () => {
+    const d = await classifyTurn(
+      makeInput("帮我抓取今日热点", {
+        intent: "Hot ",
+        mode: "intro",
+        domains: [],
+        auxTopics: [],
+        subject: "",
+        qualifier: "",
+        prevSubject: "",
+      })
+    );
+    expect(d.clsOk).toBe(false);
+    expect(d.isHotRequest).toBe(true); // FETCH_DATA_RE 兜底
+    expect(d.turnType).toBe("hotboard");
+  });
+
+  it("intent 是自造类别（news）且无动作词 → 三类请求全 false，不静默走偏", async () => {
+    const d = await classifyTurn(
+      makeInput("最近大瓜好多", {
+        intent: "news",
+        mode: "intro",
+        domains: [],
+        auxTopics: [],
+        subject: "",
+        qualifier: "",
+        prevSubject: "",
+      })
+    );
+    expect(d.clsOk).toBe(false);
+    expect(d.isHotRequest).toBe(false);
+    expect(d.isTaskRequest).toBe(false);
+    expect(d.clsEntity).toBe(false);
+  });
+
+  it("分类器返回体不是合法 JSON → clsOk=false，弱话题词不触发抓榜", async () => {
+    const d = await classifyTurn(
+      makeInput("最近大瓜好多", async () => "抱歉我无法判断")
+    );
+    expect(d.clsOk).toBe(false);
+    expect(d.isHotRequest).toBe(false);
+  });
+});
+
+describe("分类器失败重试一次", () => {
+  it("第一遍抛异常、第二遍返回合法结果 → 采信第二遍，clsOk=true", async () => {
+    let calls = 0;
+    const d = await classifyTurn(
+      makeInput("帮我抓今日热点", async () => {
+        calls++;
+        if (calls === 1) throw new Error("network timeout");
+        return JSON.stringify({
+          intent: "hot",
+          mode: "intro",
+          domains: [],
+          auxTopics: [],
+          subject: "",
+          qualifier: "",
+          prevSubject: "",
+        });
+      })
+    );
+    expect(calls).toBe(2);
+    expect(d.clsOk).toBe(true);
+    expect(d.isHotRequest).toBe(true);
+  }, 10000);
+});
+
+describe("拉丁领域名大小写与整词边界", () => {
+  it("用户写大写 BL、清单是小写 bl → 确定性预提取腿仍命中", async () => {
+    const d = await classifyTurn(
+      makeInput(
+        "帮我抓一下 BL 的热点",
+        {
+          intent: "hot",
+          mode: "intro",
+          domains: [],
+          auxTopics: [],
+          subject: "",
+          qualifier: "",
+          prevSubject: "",
+        },
+        { domainUniverse: ["bl"] }
+      )
+    );
+    expect(d.msgDomains).toContain("bl");
+  });
+
+  it("bl 不得在 blackpink 里误命中（整词边界）", async () => {
+    const d = await classifyTurn(
+      makeInput(
+        "blackpink 的新歌好好听",
+        {
+          intent: "chat",
+          mode: "intro",
+          domains: [],
+          auxTopics: [],
+          subject: "",
+          qualifier: "",
+          prevSubject: "",
+        },
+        { domainUniverse: ["bl"] }
+      )
+    );
+    expect(d.msgDomains).not.toContain("bl");
+  });
+});

@@ -12,6 +12,23 @@
 export type TurnType = "hotboard" | "overview" | "other";
 export type LastTurnType = TurnType | "none";
 
+// 合法意图白名单：模型返回任何其他值（拼错、带空格、自造类别）都视为分类失败走兜底，
+// 绝不静默落入"三个布尔全 false"的普通问答路。
+const VALID_INTENTS = ["hot", "chat", "entity", "task"] as const;
+
+// 领域名是否在用户原话中被点名（确定性预提取腿，与分类器提取腿共用同一口径）：
+// 含汉字词用忽略大小写子串；纯拉丁/数字词要求整词边界——"bl"不得命中 blackpink，
+// "cs"不得命中 ios。历史 bug：两条提取腿一条 toLowerCase 一条没有，大写 BL 漏认。
+function domainMentioned(name: string, text: string): boolean {
+  const n = (name || "").trim();
+  if (n.length < 2) return false;
+  if (/^[A-Za-z0-9 ._\-]+$/.test(n)) {
+    const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?<![A-Za-z])${esc}(?![A-Za-z])`, "i").test(text);
+  }
+  return text.toLowerCase().includes(n.toLowerCase());
+}
+
 // 明确产出动作（写稿/润色/翻译等）；同时被 chat route 的任务泄漏截除复用，故导出。
 export const TASK_VERB_RE =
   /润色|改写|翻译|扩写|缩写|校对|改错|续写|帮我写|帮我改|帮我把|帮我润|帮我出|写一段|写一篇|写一条|写一版|写个|写份|写稿|来一篇|来一版|稿子|起个标题|取个标题|开场白|口播稿|文案|视频脚本|短视频脚本|分镜/;
@@ -59,7 +76,7 @@ export async function classifyTurn(
   // 本轮逐字点名的领域（清单内词在用户原话出现即命中；清单外词由分类器提取后同样逐字校验）
   const msgDomains: string[] = Array.from(
     new Set(
-      universe.filter((d) => d && d.length > 1 && lastUserContent.includes(d))
+      universe.filter((d) => d && d.length > 1 && domainMentioned(d, lastUserContent))
     )
   );
   const auxTopics: string[] = [];
@@ -74,99 +91,111 @@ export async function classifyTurn(
   let turnType: TurnType = "other";
 
   if (lastUserContent.trim()) {
-    try {
-      const clsRes = await classify(buildClassifierPrompt({
-        universe,
-        lastTurnType,
-        lastAssistantExcerpt,
-        lastUserContent,
-      }));
-      const m = String(clsRes || "").match(/\{[\s\S]*\}/);
-      if (m) {
-        const obj = JSON.parse(m[0]);
-        if (obj && typeof obj === "object") {
-          // 分类器是本轮 intent 的唯一权威；提取的名字/领域仍要过原文逐字校验闸。
-          clsOk = true;
-          isHotRequest = obj.intent === "hot";
-          if (obj.intent === "task") isTaskRequest = true;
-          if (obj.intent === "entity") clsEntity = true;
-          if (obj.intent === "hot") turnType = "hotboard";
-          else if (obj.intent === "entity" && obj.mode === "intro")
-            turnType = "overview";
-
-          const lowCur = lastUserContent.toLowerCase();
-          const lowHist = priorContextText.toLowerCase();
-
-          // qualifier 先于 subject 校验：多义含义选定轮的主体名只在上文、不在本轮原话，
-          // qualifier 在本轮逐字出现即为真实输入凭证，subject 闸据此放宽到上文历史。
-          if (obj.intent === "entity" && typeof obj.qualifier === "string") {
-            const qf = obj.qualifier.trim().slice(0, 12);
-            if (qf && lowCur.includes(qf.toLowerCase()))
-              subjectQualifier = qf;
-          }
-          // subject 逐字校验闸：本轮原话，或 followup/多义选定轮放宽到上文历史。
-          if (
-            (obj.intent === "chat" || obj.intent === "entity") &&
-            typeof obj.subject === "string"
-          ) {
-            const s = obj.subject.trim().slice(0, 40);
-            const allowHist =
-              obj.mode === "followup" || subjectQualifier.length > 0;
-            const verbatimOk =
-              s.length > 0 &&
-              (lowCur.includes(s.toLowerCase()) ||
-                (allowHist && lowHist.includes(s.toLowerCase())));
-            if (verbatimOk) chatSubject = s;
-          }
-          // prevSubject 逐字校验
-          let prevSubjectVerified = "";
-          if (typeof obj.prevSubject === "string") {
-            const ps = obj.prevSubject.trim().slice(0, 40);
-            if (ps && lowHist.includes(ps.toLowerCase()))
-              prevSubjectVerified = ps;
-          }
-          // followup 跨主体结构闸：followup 是代词封闭集合，若 subject 与 prevSubject 不同
-          // 且新名字明写在本轮 → 实为新主体指称查询，确定性扳回 intro（触发该主体预取）。
-          if (obj.intent === "entity" && obj.mode === "followup") {
-            const sInCur =
-              !!chatSubject && lowCur.includes(chatSubject.toLowerCase());
-            const crossToNewName =
-              !!prevSubjectVerified &&
-              !!chatSubject &&
-              chatSubject !== prevSubjectVerified &&
-              sInCur;
-            entityFollowup = !crossToNewName;
-            if (crossToNewName) turnType = "overview";
-          }
-          if (obj.intent === "hot" && Array.isArray(obj.domains)) {
-            const lowMsg = lastUserContent.toLowerCase();
-            const picks: string[] = (obj.domains as unknown[])
-              .map((x) => String(x).trim())
-              .filter(
-                (x) => x.length >= 2 && lowMsg.includes(x.toLowerCase())
-              );
-            msgDomains.push(
-              ...Array.from(new Set<string>(picks)).filter(
-                (x) => !msgDomains.includes(x)
-              )
-            );
-          }
-          if (obj.intent === "hot" && Array.isArray(obj.auxTopics)) {
-            const lowMsg2 = lastUserContent.toLowerCase();
-            const auxPicks: string[] = (obj.auxTopics as unknown[])
-              .map((x) => String(x).trim())
-              .filter(
-                (x) =>
-                  x.length >= 2 &&
-                  lowMsg2.includes(x.toLowerCase()) &&
-                  !msgDomains.includes(x)
-              );
-            auxTopics.push(...Array.from(new Set<string>(auxPicks)).slice(0, 2));
-          }
-        }
+    const classifierPrompt = buildClassifierPrompt({
+      universe,
+      lastTurnType,
+      lastAssistantExcerpt,
+      lastUserContent,
+    });
+    // 两遍尝试：网络抖动 / JSON 损坏 / intent 值非法都允许自愈一次（temperature=0 输出本应稳定）。
+    let obj: any = null;
+    for (let attempt = 0; attempt < 2 && !obj; attempt++) {
+      try {
+        const clsRes = await classify(classifierPrompt);
+        const m = String(clsRes || "").match(/\{[\s\S]*\}/);
+        if (!m) throw new Error("classifier-no-json");
+        const parsed = JSON.parse(m[0]);
+        if (!parsed || typeof parsed !== "object")
+          throw new Error("classifier-bad-json");
+        // intent 白名单：拼错/自造类别（"hot "、"Hot"、"news"）一律按分类失败处理，
+        // 不静默掉进普通问答路。
+        if (
+          !VALID_INTENTS.includes(String(parsed.intent) as (typeof VALID_INTENTS)[number])
+        )
+          throw new Error("classifier-bad-intent:" + String(parsed.intent));
+        obj = parsed;
+      } catch {
+        // 第一遍失败：等 600ms 重试；第二遍仍失败：obj 保持 null，下方走动作词兜底。
+        if (attempt === 0)
+          await new Promise((r) => setTimeout(r, 600));
       }
-    } catch {
-      // 分类器失败不可静默当成功：clsOk 保持 false，下方走动作词兜底（route 另有错误日志）
+    }
+    if (obj) {
+      // 分类器是本轮 intent 的唯一权威；提取的名字/领域仍要过原文逐字校验闸。
+      clsOk = true;
+      isHotRequest = obj.intent === "hot";
+      if (obj.intent === "task") isTaskRequest = true;
+      if (obj.intent === "entity") clsEntity = true;
+      if (obj.intent === "hot") turnType = "hotboard";
+      else if (obj.intent === "entity" && obj.mode === "intro")
+        turnType = "overview";
+
+      const lowCur = lastUserContent.toLowerCase();
+      const lowHist = priorContextText.toLowerCase();
+
+      // qualifier 先于 subject 校验：多义含义选定轮的主体名只在上文、不在本轮原话，
+      // qualifier 在本轮逐字出现即为真实输入凭证，subject 闸据此放宽到上文历史。
+      if (obj.intent === "entity" && typeof obj.qualifier === "string") {
+        const qf = obj.qualifier.trim().slice(0, 12);
+        if (qf && lowCur.includes(qf.toLowerCase()))
+          subjectQualifier = qf;
+      }
+      // subject 逐字校验闸：本轮原话，或 followup/多义选定轮放宽到上文历史。
+      if (
+        (obj.intent === "chat" || obj.intent === "entity") &&
+        typeof obj.subject === "string"
+      ) {
+        const s = obj.subject.trim().slice(0, 40);
+        const allowHist =
+          obj.mode === "followup" || subjectQualifier.length > 0;
+        const verbatimOk =
+          s.length > 0 &&
+          (lowCur.includes(s.toLowerCase()) ||
+            (allowHist && lowHist.includes(s.toLowerCase())));
+        if (verbatimOk) chatSubject = s;
+      }
+      // prevSubject 逐字校验
+      let prevSubjectVerified = "";
+      if (typeof obj.prevSubject === "string") {
+        const ps = obj.prevSubject.trim().slice(0, 40);
+        if (ps && lowHist.includes(ps.toLowerCase()))
+          prevSubjectVerified = ps;
+      }
+      // followup 跨主体结构闸：followup 是代词封闭集合，若 subject 与 prevSubject 不同
+      // 且新名字明写在本轮 → 实为新主体指称查询，确定性扳回 intro（触发该主体预取）。
+      if (obj.intent === "entity" && obj.mode === "followup") {
+        const sInCur =
+          !!chatSubject && lowCur.includes(chatSubject.toLowerCase());
+        const crossToNewName =
+          !!prevSubjectVerified &&
+          !!chatSubject &&
+          chatSubject !== prevSubjectVerified &&
+          sInCur;
+        entityFollowup = !crossToNewName;
+        if (crossToNewName) turnType = "overview";
+      }
+      if (obj.intent === "hot" && Array.isArray(obj.domains)) {
+        const picks: string[] = (obj.domains as unknown[])
+          .map((x) => String(x).trim())
+          // 与确定性预提取腿同口径：忽略大小写 + 拉丁短词整词边界。
+          .filter((x) => x.length >= 2 && domainMentioned(x, lastUserContent));
+        msgDomains.push(
+          ...Array.from(new Set<string>(picks)).filter(
+            (x) => !msgDomains.includes(x)
+          )
+        );
+      }
+      if (obj.intent === "hot" && Array.isArray(obj.auxTopics)) {
+        const auxPicks: string[] = (obj.auxTopics as unknown[])
+          .map((x) => String(x).trim())
+          .filter(
+            (x) =>
+              x.length >= 2 &&
+              domainMentioned(x, lastUserContent) &&
+              !msgDomains.includes(x)
+          );
+        auxTopics.push(...Array.from(new Set<string>(auxPicks)).slice(0, 2));
+      }
     }
   }
 
@@ -201,7 +230,7 @@ function buildClassifierPrompt(args: {
 }): string {
   const { universe, lastTurnType, lastAssistantExcerpt, lastUserContent } =
     args;
-  return `判断用户消息的意图，并提取领域与附带话题。已有领域清单（domains 优先从这里选，必须逐字保留写法）：${universe.join(
+  return /* intent-classifier-prompt-start */ `判断用户消息的意图，并提取领域与附带话题。已有领域清单（domains 优先从这里选，必须逐字保留写法）：${universe.join(
     "、"
   )}。只返回 JSON，不要任何解释：{"intent":"hot、chat、entity或task","mode":"intro或followup","domains":["领域名"],"auxTopics":["附带话题"],"subject":"核心主体名或空串","qualifier":"主体限定词或空串","prevSubject":"上文主体名或空串"}。
 【上一轮结构（服务端确定性判定，权威线索，优先于你对节选文字的自行揣测）】${
@@ -215,11 +244,12 @@ function buildClassifierPrompt(args: {
   }。用户若发极简残句（如"X的""X呢""换X"），结合该结构判：热榜后的残句通常是【换 X 领域重抓】(intent=hot，domains 逐字填 X，subject/qualifier/prevSubject 均空串)；主体速览/多义解释后的"X的"残句通常是【选定该主体的 X 含义、按该含义重新展开】(intent=entity，mode=intro——不是 followup 追问细节，subject 填被解释的那个多义主体名，qualifier 逐字填 X，prevSubject 也填该主体名)。助手上一条节选：${lastAssistantExcerpt || "（无）"}。
 ⚠️【裸名词 vs "X的"残句——必须分清，最高频错判点】用户在输入框只发一个【光秃秃的话题名词】（无句末"的/呢"、无"换/来/切"、无"抓/拉/看/有什么/有啥/可写/大瓜/热点/榜单"等任何数据请求词或动词），如"女性主义""劳动法""露营""量子计算"：这不是换领域重抓，而是用户把这个话题本身抛出来【想看懂它、要切入方向】→ 一律判 intent=entity、mode=intro、subject 逐字填该词、domains=[]，【即使】该词恰好出现在领域清单里、【即使】上文是热榜、【即使】右上角选了同名领域也不变——是不是重抓只看句子本身有没有"的/呢"残句标志或抓取动作词，与清单/上文无关。只有带"的/呢"的承接残句（"女性主义的""女性主义的呢"）或明确动作句（"女性主义今天有什么热点"）才判 intent=hot。
 【task 判据】用户要求产出或加工内容：写口播稿/视频脚本/文案/标题、润色、改写、翻译、扩写、缩写、续写等"帮我做X产出"请求——【消息里带具体主体也算 task】，如"zont1x年少成名、生涯坎坷的角度写口播稿"。
-【核心判断原则——先分清用户要的是"数据"、"产出"还是"判断/问答"】hot=用户此刻要的是"今天的榜单数据"：想看到各平台热榜列表本身（抓取/拉取/看看今天有什么热点/找可写的选题素材）。chat=用户要的是"判断、建议、分析或方案"：问你怎么看/值不值得做/怎么办，即使消息里出现"很火""热门""大热"也不是在要榜单。
+【核心判断原则——先分清用户要的是"数据"、"产出"还是"判断/问答"】hot=用户此刻要的是"今天的榜单数据"：想看到各平台热榜列表本身（抓取/拉取/看看今天有什么热点/找可写的选题素材）。chat=用户要的是"判断、建议或方案"：问你怎么看/值不值得做/该不该/怎么办/要不要，即使消息里出现"很火""热门""大热"也不是在要榜单。⚠️事实原因≠评价建议：问"X为什么火/怎么突然火了/怎么回事/发生了什么/什么来历/什么原因"是在求事实性来龙去脉，X 是具体主体时判 entity，不判 chat；只有在向你要评价、取舍或行动决策时才是 chat。
 【entity 判据——具体主体聚焦】消息指向一个具体、单一、可指名的主体（人物/战队/组织/公司/作品/产品/APP/节目/店铺/地点/事件/题材均可，如选手名、队名、剧名、APP名、景点名、店名、某种现象），用户把它单独抛出、围绕它提问、或想围绕它找内容方向，且不是在要榜单数据、也不是产出任务 → entity。
 【entity 的 mode】intro=用户首次点名主体/想看主体全貌（裸词点名、"X是谁"、换了个新主体）；followup=对话上文已经围绕该主体展开过、用户在追问/求证/补充某个具体信息点（如"他当时为什么被下放""再讲讲那段经历""补充一下细节"）。判断依据看上文：上文助手回复节选：${lastAssistantExcerpt || "（无上文）"}。
 ⚠️【新名字指称问句 = intro，不是 followup】followup 仅限用户用【代词/省略主语】指代上文主体（他/她/它/这人/那个/上面说的，这是一个封闭的代词集合）。如果用户【明确写出了一个新的名字/称谓】问"X是谁/X什么意思/X是什么梗"，哪怕上文正在聊别的人、哪怕这个名字是在上文里被顺带提到的（上文聊选手A时顺带提了另一个外号B，用户接着问"B是谁"），这都是一个【全新主体的指称查询】→ 判 entity+intro、subject 填这个新名字（B）、prevSubject 填上文正在聊的主体（A），【绝对不要】沿用上文主体（A）判 followup——否则会把新名字错按成上文那个人身边的人。
 【句式判据（比话题词可靠）】先看句子的核心诉求，再数词：祈使句在要数据（抓/拉/列/给我看/今天有什么可写可挖的）→ hot；疑问句在求评价或求建议（值得…吗/值不值得/该不该/怎么看/怎么评价/怎么蹭/能不能做/要不要跟）→ chat——哪怕句子里出现"很火""爆了""有流量""热点"也不改变性质。不要数话题词，要问"用户此刻想要的是一份列表、一份产出，还是一个判断或一句回答"。
+【否定·先于动作词】抓/拉/写等动作词前若有"别/不要/不用/先别/甭/不用给我"等否定，该动作【不算数】，按否定之后真正剩下的诉求判：如"别抓热点了，聊聊村超值不值得做"→chat（subject=村超）；"不用给我拉榜单，他当年为什么离队"→entity+followup（沿用上文主体）；"先别写稿，这个人是谁"→entity+intro。绝不能因为句子里出现"热点/榜单/写稿"这些词就判 hot 或 task。
 【不对称代价规则】把 chat 误判成 hot，用户正常的提问会被一整份热榜顶掉，是严重错误；因此 hot 与 chat 之间拿不准一律判 chat。entity 与 chat 拿不准时：上文明显已在聊该主体且本轮在问细节 → entity+followup；是全新主体 → entity+intro；完全没把握有没有主体 → chat。把 followup 误判成 intro，用户只想追问一句却会重新收到一整份速览大面板，同样是严重错误。（例外：上文"新名字指称问句"规则优先——明确写新名字问"是谁/什么意思"一律 intro。）
 【domains 提取——必须逐字】domains 里的每个词都必须是用户本轮消息里【逐字出现】的词（服务端会逐字校验，非原话词一律丢弃，清单内词也不豁免）：清单里的词在原话出现就逐字填；用户用近义词/换说法时（如"女权"对应清单里的"女性主义"、"打工人"对应"职场成长"），【逐字填用户原话里的那个词】（填"女权""打工人"，绝不能改写成清单词"女性主义""职场成长"——改写即猜测，会被丢弃）；用户自造的话题词（如"bl与bg大战"）同样原样提取；最多 2 个；没有明确指向就给 []；intent 为 chat、entity 或 task 时 domains 一律 []。⚠️ 承接热点轮的"X的"残句（如"电竞的""宠物的"）是在要求换成 X 领域重抓：intent 判 hot，domains 逐字提取 X（哪怕 X 不在清单里），绝不能因为消息没写全"电竞的热点"就漏提、也绝不能填上文或右上角的旧领域。
 【auxTopics 提取】用户在抓热点类消息里【顺带】提到、但不作为主筛选依据的其他具体话题（如"帮我抓取今日热点，关注一下量子计算突破"里的"量子计算突破"）：原样提取放进 auxTopics（最多 2 个，保留用户写法，必须逐字出现在消息里）；没有就给 []；intent 为 chat、entity 或 task 时 auxTopics 一律 []。
@@ -248,5 +278,8 @@ function buildClassifierPrompt(args: {
 "露营"（无上文，用户裸发一个话题）→{"intent":"entity","mode":"intro","domains":[],"auxTopics":[],"subject":"露营","qualifier":"","prevSubject":""}
 "女权圈最近有什么大瓜可以写"→{"intent":"hot","mode":"intro","domains":["女权"],"auxTopics":[],"subject":"","qualifier":"","prevSubject":""}
 "看看最近打工人圈有啥热闹"→{"intent":"hot","mode":"intro","domains":["打工人"],"auxTopics":[],"subject":"","qualifier":"","prevSubject":""}
-用户消息：${lastUserContent.slice(0, 300)}`;
+"别抓热点了，就跟我聊聊村超到底值不值得做"→{"intent":"chat","mode":"intro","domains":[],"auxTopics":[],"subject":"村超","qualifier":"","prevSubject":""}
+"不用给我拉榜单，他当年为什么离开战队"（上文刚聊过Faker）→{"intent":"entity","mode":"followup","domains":[],"auxTopics":[],"subject":"Faker","qualifier":"","prevSubject":"Faker"}
+"先别写稿了，花少北是谁"（上文在聊老番茄）→{"intent":"entity","mode":"intro","domains":[],"auxTopics":[],"subject":"花少北","qualifier":"","prevSubject":"老番茄"}
+用户消息：${lastUserContent.slice(0, 300)}`; /* intent-classifier-prompt-end */
 }
