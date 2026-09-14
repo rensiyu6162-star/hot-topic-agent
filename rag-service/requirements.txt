@@ -1,0 +1,7 @@
+transformers>=4.51,<5
+modelscope>=1.18
+fastapi>=0.115
+uvicorn[standard]>=0.30
+faiss-cpu>=1.8,<1.10
+numpy>=1.26,<2
+pydantic>=2.7

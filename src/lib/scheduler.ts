@@ -1,16 +1,40 @@
 import { NextRequest } from "next/server";
-import { kv, kvConfigured } from "./kv";
+import { kvConfigured } from "./kv-config";
+import type { LlmOverride } from "./llm-providers";
+
+// scheduler.ts 被 API routes 正常静态 import → Next.js 正常编译 → 进 .next/server/lib/scheduler.js
+// kv.js 是纯 CommonJS，通过 eval("require") + 绝对路径加载（绕开 Next.js 编译管线）
+let _kvFn: any = null;
+function getKvFn() {
+  if (!_kvFn) {
+    // eslint-disable-next-line no-eval
+    const _require = eval("require");
+    _kvFn = _require(
+      _require("path").join(process.cwd(), "src", "server", "kv.js")
+    ).kv;
+  }
+  return _kvFn;
+}
+async function kv(...args: any[]): Promise<any> {
+  return getKvFn()(...args);
+}
 
 // ===== 定时任务（服务端）=====
 // 以「同步码」为身份：调度配置存在 KV 的 sched:<code>，抓取结果写回 sync:<code> 的专属会话。
 // 到点由进程内定时器(instrumentation.ts)每分钟调用 runDueSchedules() 驱动——
 // VPS 上的 Docker 是常驻进程，关掉浏览器也能跑；Vercel 无常驻定时器，实际以 VPS 为准。
+//
+// Key 策略（强制 BYOK）：定时任务到点无人值守、用不了浏览器 localStorage 里的 Key，
+// 因此创建任务时必须把创建者【自己的 Key】随快照存入 sched:<code>，到点用它跑——
+// 服务端系统 Key 绝不为匿名访客的定时任务兜底。
 
 export interface ScheduleSnapshot {
   domain: string; // 锁定领域串（空=全部）
   platforms: string[];
   glossary: Record<string, string>;
   allDomains: string[];
+  // 创建者自带的模型配置（apiKey 必填）；仅存于 sched:<code>，不进 sync 同步载荷
+  llm?: LlmOverride | null;
 }
 export interface ScheduleConfig {
   enabled: boolean;
@@ -114,11 +138,38 @@ export function normalizeConfig(
     return { error: "结束日期不能早于开始日期" };
   }
   const s = input?.snapshot || {};
+  // 创建者自带的模型配置（强制 BYOK）：apiKey 必填，缺失则拒绝创建——
+  // 到点无人值守时用这份 Key 抓取，绝不用服务端系统 Key 为匿名访客付费。
+  const rawLlm = s?.llm;
+  const llm: LlmOverride | null =
+    rawLlm &&
+    typeof rawLlm === "object" &&
+    typeof rawLlm.apiKey === "string" &&
+    rawLlm.apiKey.trim()
+      ? {
+          provider:
+            typeof rawLlm.provider === "string" ? rawLlm.provider : "deepseek",
+          apiKey: rawLlm.apiKey.trim(),
+          ...(typeof rawLlm.baseUrl === "string" && rawLlm.baseUrl.trim()
+            ? { baseUrl: rawLlm.baseUrl.trim() }
+            : {}),
+          ...(typeof rawLlm.model === "string" && rawLlm.model.trim()
+            ? { model: rawLlm.model.trim() }
+            : {}),
+        }
+      : null;
+  if (!llm) {
+    return {
+      error:
+        "定时任务需要先配置你自己的 API Key：打开「🤖 AI 模型」填好并保存后再创建（到点自动抓取时用的是你自己的 Key）。",
+    };
+  }
   const snapshot: ScheduleSnapshot = {
     domain: typeof s.domain === "string" ? s.domain : "",
     platforms: Array.isArray(s.platforms) ? s.platforms : [],
     glossary: s.glossary && typeof s.glossary === "object" ? s.glossary : {},
     allDomains: Array.isArray(s.allDomains) ? s.allDomains : [],
+    llm,
   };
   return {
     enabled: input?.enabled !== false,
@@ -157,18 +208,29 @@ async function runFetch(
       platforms: snapshot.platforms,
       glossary: snapshot.glossary,
       allDomains: snapshot.allDomains,
+      // 用创建者创建任务时保存的自带 Key（强制 BYOK，不花系统 Key）
+      llm: snapshot.llm ?? null,
     }),
   });
 
   let content = "";
   let toolLogs: string[] = [];
   let emptyNote: string | null = null;
+  let refs: any = null;
   try {
     const res = await chatPOST(chatReq);
     const data = await res.json();
     content = data?.content || "（本次未获取到内容）";
     toolLogs = Array.isArray(data?.toolLogs) ? data.toolLogs : [];
     emptyNote = data?.emptyNote || null;
+    // 定时抓取若走了全网搜索补挂/兜底，参考来源同样挂到第一层回复（前端按 refs 渲染折叠块）
+    if (
+      data?.refs &&
+      typeof data.refs === "object" &&
+      (Array.isArray(data.refs.sites) || Array.isArray(data.refs.videos))
+    ) {
+      refs = data.refs;
+    }
   } catch (e: any) {
     content = `⚠️ 定时抓取失败：${e?.message || e}`;
   }
@@ -201,12 +263,31 @@ async function runFetch(
   sess.messages.push({ role: "user", content: `[${stamp}] ${userText}` });
   const assistantMsg: any = { role: "assistant", content, toolLogs };
   if (emptyNote) assistantMsg.emptyNote = emptyNote;
+  if (refs) assistantMsg.refs = refs;
   sess.messages.push(assistantMsg);
 
   // 限制专属会话消息数，防止无限增长（保留最近 200 条 + 欢迎语）
   if (sess.messages.length > 201) {
     const welcome = sess.messages[0];
     sess.messages = [welcome, ...sess.messages.slice(-200)];
+  }
+
+  // 成功的抓取结果自动沉淀到本地 RAG 知识库，供日后"历史回溯/复盘"类提问检索。
+  // 失败、空结果不入库；ingest 内部静默失败，绝不影响同步主流程。
+  if (!content.startsWith("⚠️") && content !== "（本次未获取到内容）" && !emptyNote) {
+    try {
+      const { ingestHotDocs } = await import("@/lib/rag-ingest");
+      await ingestHotDocs([
+        {
+          title: `${stamp} 热点抓取${snapshot.domain ? "·" + snapshot.domain : ""}`,
+          body: content,
+          category: snapshot.domain || undefined,
+          platforms: Array.isArray(snapshot.platforms) ? snapshot.platforms : undefined,
+          date: stamp.slice(0, 10),
+          docId: `sched:${code}:${slotKey}`,
+        },
+      ]);
+    } catch {}
   }
 
   await kv([
@@ -219,7 +300,22 @@ async function runFetch(
 }
 
 // 每分钟由 instrumentation 定时器调用：扫描所有配置，跑到点的槽位
+// 进程内互斥（2026-09）：instrumentation 的每分钟定时器与 /api/schedule/tick（外部 cron 兜底）
+// 可能同时触发本函数。单次 runFetch 内含完整 chat 抓取、要跑几十秒，而 fired 槽位是
+// "跑完才写"——并发双触发会对同一槽位各跑一次（重复抓取+重复消息），且两次对 sync:<code>
+// 的读-改-写互相覆盖会丢消息。VPS 上是单 Docker 单进程，一个布尔互斥即可根治。
+const schedGlobals = globalThis as unknown as { __HT_SCHED_RUNNING__?: boolean };
 export async function runDueSchedules(nowMs: number = Date.now()): Promise<void> {
+  if (schedGlobals.__HT_SCHED_RUNNING__) return;
+  schedGlobals.__HT_SCHED_RUNNING__ = true;
+  try {
+    await runDueSchedulesInner(nowMs);
+  } finally {
+    schedGlobals.__HT_SCHED_RUNNING__ = false;
+  }
+}
+
+async function runDueSchedulesInner(nowMs: number): Promise<void> {
   if (!kvConfigured()) return;
   let codes: string[] = [];
   try {

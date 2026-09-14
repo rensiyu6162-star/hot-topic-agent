@@ -6,7 +6,7 @@ import {
   normalizeConfig,
   cstToday,
 } from "@/lib/scheduler";
-import { kvConfigured } from "@/lib/kv";
+import { kvConfigured } from "@/lib/kv-config";
 
 // 定时任务配置：以「同步码」为身份。
 // GET  /api/schedule?code=xxx        → 返回当前配置（无则 null）
@@ -30,7 +30,21 @@ export async function GET(req: NextRequest) {
   }
   try {
     const cfg = await getSchedule(code);
-    return NextResponse.json({ config: cfg });
+    // 回显时脱敏：snapshot.llm 含创建者的 API Key，绝不下发；只给一个"是否已配置"标志
+    if (cfg?.snapshot?.llm) {
+      const { llm, ...snapRest } = cfg.snapshot;
+      return NextResponse.json({
+        config: {
+          ...cfg,
+          snapshot: snapRest,
+          llmConfigured: !!llm?.apiKey,
+          llmProvider: llm?.provider || "deepseek",
+        },
+      });
+    }
+    return NextResponse.json({
+      config: cfg ? { ...cfg, llmConfigured: false } : cfg,
+    });
   } catch (e: any) {
     return NextResponse.json({ error: `读取失败: ${e.message}` }, { status: 500 });
   }

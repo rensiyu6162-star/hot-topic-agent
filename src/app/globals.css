@@ -10,5 +10,210 @@ body {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* 轻量清爽：中文字体优先，去掉 Roboto（AI 俗套默认字体）；系统栈零外部加载 */
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Noto Sans SC", system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ========== 柔和阴影（轻量清爽，替代生硬 shadow-lg/xl） ========== */
+.shadow-soft {
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 4px 12px rgba(15, 23, 42, 0.06);
+}
+.shadow-softer {
+  box-shadow:
+    0 2px 4px rgba(15, 23, 42, 0.04),
+    0 12px 32px rgba(15, 23, 42, 0.1);
+}
+.shadow-float {
+  box-shadow:
+    0 8px 24px rgba(15, 23, 42, 0.08),
+    0 2px 8px rgba(15, 23, 42, 0.04);
+}
+
+/* 自定义缓动曲线（模拟真实质量的动效，替代默认 ease-in-out） */
+.ease-spring {
+  transition-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* 选区 / 焦点 / 占位符：浏览器默认表面也属于设计系统 */
+::selection {
+  background: rgba(79, 70, 229, 0.18);
+}
+:focus-visible {
+  outline: 2px solid #4f46e5;
+  outline-offset: 2px;
+}
+input::placeholder,
+textarea::placeholder {
+  color: #9aa1b0;
+}
+
+/* 细分滚动条 */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.25);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.4);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 滚轮选择器：隐藏滚动条 */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+/* ========== 「思考中」动效：渐变流光文字 + 弹跳点 + 呼吸光晕 ========== */
+.thinking-bubble {
+  animation: thinkingBreath 2.4s ease-in-out infinite;
+}
+@keyframes thinkingBreath {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(99, 102, 241, 0);
+  }
+  50% {
+    box-shadow: 0 0 14px 2px rgba(99, 102, 241, 0.16);
+  }
+}
+.thinking-text {
+  background: linear-gradient(90deg, #9ca3af 25%, #6366f1 50%, #9ca3af 75%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: thinkingShimmer 1.8s linear infinite;
+}
+@keyframes thinkingShimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+.thinking-dots {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 6px;
+  align-items: center;
+}
+.thinking-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: #818cf8;
+  animation: thinkingDot 1.2s ease-in-out infinite;
+}
+.thinking-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.thinking-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes thinkingDot {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  50% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+/* 失败卡片「重试后仍失败」：红框 + 左右轻晃 + 红底脉冲两下。
+   语义是"又试了一次，还是不行"，所以用警示红而不是之前几乎看不清的淡靛蓝。
+   动画结束在 100% 恢复常态（白底透明边），不留永久红色。 */
+.fail-shake {
+  animation: failShake 0.62s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+  border-color: #fca5a5;
+}
+@keyframes failShake {
+  0%,
+  100% {
+    transform: translateX(0);
+    border-color: #fca5a5;
+    background-color: #ffffff;
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
+  15% {
+    transform: translateX(-6px);
+    border-color: #ef4444;
+    background-color: #fef2f2;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.22);
+  }
+  30% {
+    transform: translateX(5px);
+    border-color: #ef4444;
+    background-color: #fef2f2;
+  }
+  45% {
+    transform: translateX(-4px);
+    background-color: #ffffff;
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
+  60% {
+    transform: translateX(3px);
+    border-color: #ef4444;
+    background-color: #fef2f2;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18);
+  }
+  75% {
+    transform: translateX(-2px);
+    background-color: #ffffff;
+  }
+}
+
+/* 梗概框素材填入反馈：从时间线/角度卡点击填入时，靛蓝光晕+浅底柔和亮一下后回到常态，
+   让"内容填到哪了"看得见。动画结束态=输入框常态，不留残色。 */
+.plot-flash {
+  animation: plotFlash 0.85s ease-out 1;
+}
+@keyframes plotFlash {
+  0% {
+    border-color: #818cf8;
+    background-color: #eef2ff;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25);
+  }
+  100% {
+    border-color: #e5e7eb;
+    background-color: #ffffff;
+    box-shadow: 0 0 0 0 rgba(99, 102, 241, 0);
+  }
+}
+
+/* 系统开启减弱动态效果时全部停用，退回静态灰字；
+   红抖停用后保留一次纯红色边框+浅红底的静态提示（0.6s），仍然有"试过且失败"的反馈 */
+@media (prefers-reduced-motion: reduce) {
+  .thinking-bubble,
+  .thinking-text,
+  .thinking-dots i,
+  .fail-shake,
+  .plot-flash {
+    animation: none;
+  }
+  .fail-shake {
+    border-color: #ef4444;
+    background-color: #fef2f2;
+  }
+  .thinking-text {
+    color: #9ca3af;
+    -webkit-text-fill-color: #9ca3af;
+  }
 }

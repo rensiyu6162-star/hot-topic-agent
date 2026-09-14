@@ -16,3 +16,9 @@ tsconfig.tsbuildinfo
 .vscode
 .idea
 *.sw?
+
+# Local commit message scratch file
+.git-commit-msg.txt
+
+# 本地知识库语料/向量索引（体积大，不入库）
+data/
