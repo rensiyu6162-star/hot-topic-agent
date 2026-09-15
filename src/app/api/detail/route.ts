@@ -1056,7 +1056,7 @@ export async function POST(req: NextRequest) {
         ...(blindExpand?.keywords || []),
         ...(blindExpand?.queries || []).flatMap((q) =>
           String(q || "").split(
-            /[\s，,。.！!？?；;：:、「」【】《》""''（）()\[\]…—~·/]+
+            /[\s，,。.！!？?；;：:、「」【】《》""''（）()…—~·|]+
           )
         ),
       ];
