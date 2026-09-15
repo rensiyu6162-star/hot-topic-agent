@@ -391,7 +391,8 @@ async function searxFetchOnce(
 
 // —— 商业搜索 API 兜底（2026-09 数据源加固）——
 // 触发条件（两个都满足才花钱）：
-//   1. SearXNG 自建免费源（bing/头条/搜狗/rsshub-baidu 等）全部 0 条；
+//   1. 单路 searxSearch：SearXNG 免费源两次皆空；searxSearchUnion：网页桶 < LOW_RECALL_WEB 条
+//      （含 SearXNG 整站挂掉网页 0 条、以及网页引擎半死只剩 bilibili 视频的情况）；
 //   2. 当前是【系统内部调用】（scheduler 定时抓取，getLlm().systemOwned）。
 // 公开访客的请求即使全空也不走这里——站点无口令，不能让访客刷机主付费额度。
 // 顺序按用户要求"免费优先、没有再付费"：
@@ -402,6 +403,14 @@ async function searxFetchOnce(
 //               机房实测 api.bochaai.com 0.17s 可达。
 // 任一档没配 key 自动跳过；HTTP/解析失败 fail-open 返空，绝不阻塞主流程。
 // 返回结果同样进 10 分钟结果缓存，重复词不会重复花钱。
+//
+// 低召回阈值（2026-09 用户反馈"全是微博/视频也不对"后新增）：union 主检索的
+// 触发条件不是"总结果 0 条"，而是【网页桶 < 3 条】——bilibili 是独立引擎，网页引擎
+// 集体限流时它仍可能返回十几条视频，看总数会漏判。补位是【并入】不是替换，
+// 且最多并入 LOW_RECALL_WEB_FILL 条，防止商业结果反客为主。
+// 单路 searxSearch 仍维持"0 条才兜"：救援切词会扇出多个查询，<3 即花钱会烧穿额度。
+const LOW_RECALL_WEB = 3;
+const LOW_RECALL_WEB_FILL = 6;
 function commercialAllowed(): boolean {
   try {
     return getLlm().systemOwned === true;
@@ -839,6 +848,28 @@ export async function searxSearchUnion(
       stats.push("定义补轮失败");
     }
   }
+  // 低召回商业补位（在定义补轮之后，给免费源最后的免费机会；结果随 union 快照缓存）：
+  // 网页桶（权威+新+旧）合计 <3 条 = SearXNG 整站挂掉或网页引擎集体半死。此时若不补，
+  // detail 层合入的微博/快讯/B站视频会占满结果，缺定事实的网页。商业结果去重后按同一
+  // 套 bucketOne 归桶（权威站照样进权威桶），是补位不是替换；最多并入 6 条。
+  const webCount = () =>
+    authorityWeb.length + webFresh.length + webRest.length;
+  if (webCount() < LOW_RECALL_WEB) {
+    const webBefore = webCount();
+    const fb = await commercialFallback(core, o);
+    if (fb.hits.length > 0) {
+      let added = 0;
+      for (const h of fb.hits) {
+        if (added >= LOW_RECALL_WEB_FILL) break;
+        if (seen.has(h.url)) continue;
+        seen.add(h.url);
+        bucketOne(h);
+        added++;
+      }
+      stats.push(`低召回补位[${fb.via}]${added}条(网页原仅${webBefore}条)`);
+    }
+  }
+
   for (const arr of [webFresh, vFresh])
     arr.sort((a, b) => (b.published || "").localeCompare(a.published || ""));
 
@@ -861,15 +892,7 @@ export async function searxSearchUnion(
   push(vFresh, "video");
   push(vRest, "video");
 
-  // 四路（含空结果补轮/定义补轮）全部空手：仅系统内部调用时用商业 API
-  // 按 Tavily 免费档 → 博查付费档兜一次，避免 scheduler 产出无来源空详情。
-  if (hits.length === 0) {
-    const fb = await commercialFallback(core, o);
-    if (fb.hits.length > 0) {
-      hits.push(...fb.hits.slice(0, o.limit));
-      stats.push(`商业兜底[${fb.via}]${fb.hits.length}条`);
-    }
-  }
+  // 商业补位已在组装前按"网页桶 <3 条"触发并归桶，此处不再重复调用。
 
   if (hits.length > 0) {
     if (cache.size >= CACHE_MAX) {
