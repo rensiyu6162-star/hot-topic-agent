@@ -266,7 +266,10 @@ const isGenericRef = (u: string) => {
   // visitor.passport.weibo.cn/visitor/visitor?…（2026-09 第三轮补），统一按
   // "host 含 passport.weibo 且路径含 /visitor" 识别。
   if (u.includes("passport.weibo") && u.includes("/visitor")) return true;
-  return /baike\.baidu\.com|wikipedia\.org|wiki[a-z]*\.|\.wiki|hanyu\.baidu|dict\.|cidian|zhidao\.baidu|zhihu\.com\/topic|so\.com\/link|baidu\.com\/s\?|bing\.com\/search|google\.[a-z.]+\/search|image\.baidu\.com|baidu\.com\/search\/index|\.tmall\.com\/|tmall\.com\/shop\/|item\.taobao\.com|s\.taobao\.com\/(search|list)|taobao\.com\/list|item\.jd\.com|yangkeduo\.com\/goods/.test(
+  // baidu.com/sf/vsearch：百度视频垂搜结果页（标题/URL 原样回显任意检索词，
+  // 2026-09 咘咘男案实锤：生造词也能拿到一条"咘咘男-视频大全"壳页，伪装成"有页面
+  // 写过这个名字"），与 /s? 图片搜索一样本质是搜索壳，永远不是来源。
+  return /baike\.baidu\.com|wikipedia\.org|wiki[a-z]*\.|\.wiki|hanyu\.baidu|dict\.|cidian|zhidao\.baidu|zhihu\.com\/topic|so\.com\/link|baidu\.com\/s\?|baidu\.com\/sf\/vsearch|bing\.com\/search|google\.[a-z.]+\/search|image\.baidu\.com|baidu\.com\/search\/index|\.tmall\.com\/|tmall\.com\/shop\/|item\.taobao\.com|s\.taobao\.com\/(search|list)|taobao\.com\/list|item\.jd\.com|yangkeduo\.com\/goods/.test(
     u
   );
 };
@@ -955,10 +958,15 @@ export async function POST(req: NextRequest) {
     // 零索引判据不是"引擎返回0条"：生造词也会被模糊匹配到拆字字典/近名词条（实测"咘咘男"
     // 返回10条"咘"字字典和"咘咘"百科，没有一条含全名）；判据是【没有任何一条召回逐字包含
     // 完整主体名】——真正被讨论过的名字，召回里至少有页面原样写着它。
-    const entityHitMentions = (h: SearchHit) =>
-      `${h.title} ${h.content} ${h.url}`
+    const entityHitMentions = (h: SearchHit) => {
+      // 搜索壳/百科/电商页对任何检索词都会原样回显（实测咘咘男拿到百度视频垂搜壳页
+      // "咘咘男-视频大全"），这类"命中"不代表真有页面讨论该主体，一律不算。
+      if (isGenericRef(h.url)) return false;
+      // 只看标题+摘要正文，不看 URL——跳转链 URL 的 query 参数里常带检索词，是回显不是内容。
+      return `${h.title} ${h.content}`
         .toLowerCase()
         .includes(entity.toLowerCase());
+    };
     const entityBlind =
       !platform && entityFromCaller && !entityHits.some(entityHitMentions);
     // 救援取出的实名锚点短词（来自用户自己的角度句，非系统自造，可当事实门强证据词）
