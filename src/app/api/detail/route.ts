@@ -949,11 +949,18 @@ export async function POST(req: NextRequest) {
       allHits = [...g0, ...v0];
     }
     // 全新造词检测（2026-09 灰灰男案）：速览角度（无平台=从主体速览方向区点入，区别于
-    // 热榜单条）的主体若是刚冒头的新外号/新梗，引擎对【主体裸词】零结果，上面强制
+    // 热榜单条）的主体若是刚冒头的新外号/新梗，引擎对【主体裸词】没有真正的索引，上面强制
     // 「以主体开头」的扩展查询也全部零召回——角度句里真正有索引的实名锚点（事件当事人、
     // 关联实体）被这个没人写过的词一起陪葬，事实门只能回"没找到"。救援在下方扩展收口后。
+    // 零索引判据不是"引擎返回0条"：生造词也会被模糊匹配到拆字字典/近名词条（实测"咘咘男"
+    // 返回10条"咘"字字典和"咘咘"百科，没有一条含全名）；判据是【没有任何一条召回逐字包含
+    // 完整主体名】——真正被讨论过的名字，召回里至少有页面原样写着它。
+    const entityHitMentions = (h: SearchHit) =>
+      `${h.title} ${h.content} ${h.url}`
+        .toLowerCase()
+        .includes(entity.toLowerCase());
     const entityBlind =
-      !platform && entityFromCaller && entityHits.length === 0;
+      !platform && entityFromCaller && !entityHits.some(entityHitMentions);
     // 救援取出的实名锚点短词（来自用户自己的角度句，非系统自造，可当事实门强证据词）
     let blindAnchorKws: string[] = [];
     // 主体名兜底提取（2026-09 泛化）：详情入口没带 entity 时（从聊天/热榜直接进来的
