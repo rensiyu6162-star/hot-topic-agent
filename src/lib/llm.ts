@@ -29,7 +29,57 @@ function envLlmConfig(): LlmConfig {
       process.env.OPENAI_BASE_URL || "https://api.deepseek.com/v1"
     ),
     model: process.env.OPENAI_MODEL || "deepseek-chat",
+    // 内部标记：标识这份 cfg 来自服务端 env（scheduler 系统调用），
+    // 只有带此标记的调用允许在主通道挂掉时花 env 里的备用 Key。
+    systemOwned: true,
   };
+}
+
+// 系统备用通道链（2026-09 单点加固，顺序即优先级：免费档 → 付费档）：
+// DeepSeek 免费通道实测出现过间歇性 400/429/502（同请求重发可恢复，
+// 但也可能整段不可用）。任何一档不配 Key 就自动跳过，全不配则行为与
+// 之前完全一致。scheduler 内部调用在主通道 3 次重试仍失败（含欠费/
+// Key 失效）后，按顺序逐档切换。访客 BYOK 请求永远不走系统备用 Key。
+//
+// 免费档（推荐，2026-09 核实永久免费、无 token 上限、30 并发、
+// 支持 JSON 结构化输出/Function Calling，OpenAI 兼容）：
+//   OPENAI_BACKUP_API_KEY=智谱key
+//   OPENAI_BACKUP_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+//   OPENAI_BACKUP_MODEL=glm-4-flash
+// 付费档（免费档也挂时才用，可选；比如 DeepSeek 充了值的另一个 key
+// 或通义 qwen-turbo 等极便宜模型）：
+//   OPENAI_BACKUP2_API_KEY=...
+//   OPENAI_BACKUP2_BASE_URL=...
+//   OPENAI_BACKUP2_MODEL=...
+function envBackupLlmConfigs(): LlmConfig[] {
+  const chain: LlmConfig[] = [];
+  const freeKey = (process.env.OPENAI_BACKUP_API_KEY || "").trim();
+  if (freeKey) {
+    chain.push({
+      provider: "custom",
+      apiKey: freeKey,
+      baseUrl: trimSlash(
+        process.env.OPENAI_BACKUP_BASE_URL ||
+          "https://open.bigmodel.cn/api/paas/v4"
+      ),
+      model: process.env.OPENAI_BACKUP_MODEL || "glm-4-flash",
+      systemOwned: true,
+    });
+  }
+  const paidKey = (process.env.OPENAI_BACKUP2_API_KEY || "").trim();
+  if (paidKey) {
+    chain.push({
+      provider: "custom",
+      apiKey: paidKey,
+      baseUrl: trimSlash(
+        process.env.OPENAI_BACKUP2_BASE_URL ||
+          "https://api.deepseek.com/v1"
+      ),
+      model: process.env.OPENAI_BACKUP2_MODEL || "deepseek-chat",
+      systemOwned: true,
+    });
+  }
+  return chain;
 }
 
 // 解析一次请求的生效配置：用户填了 Key → 用用户的（平台预设 baseUrl/模型，可被上送值覆盖）；
@@ -73,7 +123,9 @@ export function resolveRequestLlm(
     typeof override?.apiKey === "string" && !!override.apiKey.trim();
   if (hasUserKey) return resolveLlmConfig(override);
   if (internal) return envLlmConfig();
-  return { ...envLlmConfig(), apiKey: "" };
+  // 访客且无 Key：必须显式抹掉 systemOwned（spread 会带上），
+  // 否则空 Key 访客会在 failover 分支花掉系统备用通道额度。
+  return { ...envLlmConfig(), apiKey: "", systemOwned: false };
 }
 
 const llmStore = new AsyncLocalStorage<LlmConfig>();
@@ -175,7 +227,8 @@ export function llmErrorAction(
 // 502/503、429——同一请求重发即成功。这类瞬时错误做最多 3 次短退避重试；
 // Key 无效/欠费类错误不重试，立刻冒泡给用户明确引导。
 const RETRYABLE_KINDS = new Set<LlmErrorKind>(["upstream", "rate_limited"]);
-export async function llmChatJson(
+// 单通道调用：最多 3 次短退避重试，Key 无效/欠费/空 Key 立即抛出不重试。
+async function chatWithCfg(
   cfg: LlmConfig,
   payload: Record<string, unknown>,
   timeoutMs = 180000
@@ -221,7 +274,7 @@ export async function llmChatJson(
       }
     } catch (e) {
       lastErr = e;
-      // 不可恢复的错误立即抛出
+      // 不可恢复的错误立即抛出（交给外层决定是否切备用通道）
       if (
         e instanceof LlmApiError &&
         (e.kind === "invalid_key" || e.kind === "no_balance" || e.kind === "no_key")
@@ -232,6 +285,53 @@ export async function llmChatJson(
         !(e instanceof LlmApiError) || RETRYABLE_KINDS.has(e.kind);
       if (!retryable || attempt === 2) throw e;
       await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+// 对外统一入口：先走调用方指定通道；若该通道是服务端系统配置（scheduler
+// 内部调用），则主通道任何失败（瞬时故障重试耗尽、欠费、Key 失效、没配
+// Key）都按"免费档 → 付费档"顺序逐档切换，任一档成功即返回。访客 BYOK
+// 调用不触发（其 cfg 不带 systemOwned），杜绝访客请求花机主备用额度。
+export async function llmChatJson(
+  cfg: LlmConfig,
+  payload: Record<string, unknown>,
+  timeoutMs = 180000
+): Promise<any> {
+  let lastErr: unknown;
+  // 只有系统内部调用才允许动用 env 里的免费/付费备用 Key 链
+  const chain = cfg.systemOwned ? envBackupLlmConfigs() : [];
+  try {
+    return await chatWithCfg(cfg, payload, timeoutMs);
+  } catch (primaryErr) {
+    lastErr = primaryErr;
+    if (chain.length === 0) throw primaryErr;
+    const why =
+      primaryErr instanceof LlmApiError
+        ? `${primaryErr.kind}(${primaryErr.status ?? "?"})`
+        : String((primaryErr as Error)?.message || primaryErr).slice(0, 120);
+    console.error(
+      `[llm-failover] 主通道 ${cfg.baseUrl} model=${cfg.model} 失败（${why}），开始按免费→付费顺序切换 ${chain.length} 个备用通道`
+    );
+  }
+  for (let i = 0; i < chain.length; i++) {
+    const backup = chain[i];
+    try {
+      const out = await chatWithCfg(backup, payload, timeoutMs);
+      console.error(
+        `[llm-failover] 备用档${i + 1}（${backup.baseUrl} model=${backup.model}）调用成功`
+      );
+      return out;
+    } catch (backupErr) {
+      lastErr = backupErr;
+      console.error(
+        `[llm-failover] 备用档${i + 1}（${backup.baseUrl}）失败：${
+          backupErr instanceof LlmApiError
+            ? `${backupErr.kind}(${backupErr.status ?? "?"})`
+            : String((backupErr as Error)?.message || backupErr).slice(0, 120)
+        }`
+      );
     }
   }
   throw lastErr;

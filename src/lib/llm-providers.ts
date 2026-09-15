@@ -106,6 +106,9 @@ export interface LlmConfig {
   apiKey: string;
   baseUrl: string;
   model: string;
+  // 仅服务端内部使用：标记该配置来自服务端 env（scheduler 系统调用），
+  // 允许在主通道故障时动用 env 备用 Key；访客上送的 BYOK 配置不带此标记。
+  systemOwned?: boolean;
 }
 
 // LLM 调用失败时的「可操作引导」（纯数据，前后端共用）：

@@ -16,6 +16,7 @@ import {
   type SourceHealthEntry,
 } from "./sourceHealth";
 import { titleRelevant, isDefinitionQuery, queryPlan } from "./relevance";
+import { getLlm } from "./llm";
 
 export interface SearxHit {
   title: string;
@@ -388,6 +389,143 @@ async function searxFetchOnce(
   }
 }
 
+// —— 商业搜索 API 兜底（2026-09 数据源加固）——
+// 触发条件（两个都满足才花钱）：
+//   1. SearXNG 自建免费源（bing/头条/搜狗/rsshub-baidu 等）全部 0 条；
+//   2. 当前是【系统内部调用】（scheduler 定时抓取，getLlm().systemOwned）。
+// 公开访客的请求即使全空也不走这里——站点无口令，不能让访客刷机主付费额度。
+// 顺序按用户要求"免费优先、没有再付费"：
+//   档1 Tavily：每月 1000 credits 永久免费、无需信用卡，basic 搜索 1 credit/次，
+//               超额 $0.008/次（2026-09 官网价）；机房实测 api.tavily.com 0.68s 可达。
+//   档2 博查 Bocha：国内中文搜索、为 AI 优化，web-search 按量约 ¥0.03/次
+//               （资源包更低，2026-09 阿里云市场 AI 搜 ¥0.06/次佐证量级）；
+//               机房实测 api.bochaai.com 0.17s 可达。
+// 任一档没配 key 自动跳过；HTTP/解析失败 fail-open 返空，绝不阻塞主流程。
+// 返回结果同样进 10 分钟结果缓存，重复词不会重复花钱。
+function commercialAllowed(): boolean {
+  try {
+    return getLlm().systemOwned === true;
+  } catch {
+    return false;
+  }
+}
+
+async function tavilySearch(
+  q: string,
+  o: Required<SearxOptions>
+): Promise<SearxHit[]> {
+  const apiKey = (process.env.TAVILY_API_KEY || "").trim();
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), o.timeoutMs);
+  try {
+    const res = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        query: q,
+        max_results: Math.min(o.limit, 10),
+        search_depth: "basic",
+        topic: "general",
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`tavily HTTP ${res.status}`);
+    const data = await res.json();
+    const raw = Array.isArray((data as any)?.results)
+      ? (data as any).results.map((r: any) => ({
+          title: r?.title || "",
+          url: r?.url || "",
+          content: r?.content || r?.raw_content || "",
+          ...(r?.published_date ? { publishedDate: r.published_date } : {}),
+        }))
+      : [];
+    return parseResults({ results: raw }, o);
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+async function bochaSearch(
+  q: string,
+  o: Required<SearxOptions>
+): Promise<SearxHit[]> {
+  const apiKey = (process.env.BOCHA_API_KEY || "").trim();
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), o.timeoutMs);
+  try {
+    const res = await fetch("https://api.bochaai.com/v1/web-search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        query: q,
+        count: Math.min(o.limit, 10),
+        summary: true,
+        freshness: "noLimit",
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`bocha HTTP ${res.status}`);
+    const data = await res.json();
+    // 博查返回结构 data.webPages.value[]；字段名多版本不一致，宽容解析。
+    const value = (data as any)?.data?.webPages?.value;
+    const raw = Array.isArray(value)
+      ? value.map((r: any) => ({
+          title: r?.name || r?.title || "",
+          url: r?.url || r?.link || "",
+          content: r?.summary || r?.snippet || r?.description || "",
+          ...(r?.datePublished || r?.publish_time || r?.dateLastCrawled
+            ? {
+                publishedDate:
+                  r?.datePublished || r?.publish_time || r?.dateLastCrawled,
+              }
+            : {}),
+        }))
+      : [];
+    return parseResults({ results: raw }, o);
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+// 免费档 → 付费档顺序尝试，任一档有结果即返回；全空/未配置返回 []。
+async function commercialFallback(
+  q: string,
+  o: Required<SearxOptions>
+): Promise<{ hits: SearxHit[]; via: string }> {
+  if (!commercialAllowed() || !q) return { hits: [], via: "" };
+  if ((process.env.TAVILY_API_KEY || "").trim()) {
+    try {
+      const hits = await tavilySearch(q, o);
+      if (hits.length > 0) return { hits, via: "tavily" };
+    } catch (e) {
+      console.warn(
+        `[search-fallback] tavily 失败 q=${q.slice(0, 20)}: ${
+          (e as Error)?.message || e
+        }`
+      );
+    }
+  }
+  if ((process.env.BOCHA_API_KEY || "").trim()) {
+    try {
+      const hits = await bochaSearch(q, o);
+      if (hits.length > 0) return { hits, via: "bocha" };
+    } catch (e) {
+      console.warn(
+        `[search-fallback] bocha 失败 q=${q.slice(0, 20)}: ${
+          (e as Error)?.message || e
+        }`
+      );
+    }
+  }
+  return { hits: [], via: "" };
+}
+
 export async function searxSearch(
   query: string,
   opts: SearxOptions = {}
@@ -438,13 +576,26 @@ export async function searxSearch(
       console.warn(`[searx] 换词重试仍失败 q2=${q2}: ${secondErr}`);
     }
     if (hits.length === 0) {
-      recordSearxHealth(
-        tag,
-        false,
-        `首发${firstErr ? `异常(${firstErr})` : "0条"}；换词"${q2}"重试${
-          secondErr ? `异常(${secondErr})` : "仍0条"
-        }`
-      );
+      // 免费源两路皆空：仅系统内部调用时用商业 API（Tavily 免费档→博查）兜一次
+      const fb = await commercialFallback(q2, o);
+      if (fb.hits.length > 0) {
+        hits = fb.hits;
+        recordSearxHealth(
+          tag,
+          true,
+          `免费源全空（首发${firstErr ? `异常(${firstErr})` : "0条"}；换词"${q2}"${
+            secondErr ? `异常(${secondErr})` : "仍0条"
+          }），商业兜底[${fb.via}]救回 ${hits.length} 条`
+        );
+      } else {
+        recordSearxHealth(
+          tag,
+          false,
+          `首发${firstErr ? `异常(${firstErr})` : "0条"}；换词"${q2}"重试${
+            secondErr ? `异常(${secondErr})` : "仍0条"
+          }${commercialAllowed() ? "" : "（访客请求不用商业兜底）"}`
+        );
+      }
     }
   } else {
     recordSearxHealth(tag, true, "");
@@ -707,6 +858,16 @@ export async function searxSearchUnion(
   push(webRest, "web");
   push(vFresh, "video");
   push(vRest, "video");
+
+  // 四路（含空结果补轮/定义补轮）全部空手：仅系统内部调用时用商业 API
+  // 按 Tavily 免费档 → 博查付费档兜一次，避免 scheduler 产出无来源空详情。
+  if (hits.length === 0) {
+    const fb = await commercialFallback(core, o);
+    if (fb.hits.length > 0) {
+      hits.push(...fb.hits.slice(0, o.limit));
+      stats.push(`商业兜底[${fb.via}]${fb.hits.length}条`);
+    }
+  }
 
   if (hits.length > 0) {
     if (cache.size >= CACHE_MAX) {
