@@ -429,6 +429,8 @@ async function tavilySearch(
         max_results: Math.min(o.limit, 10),
         search_depth: "basic",
         topic: "general",
+        // 免费、不额外扣 credit：不传时 published_date 恒为空，救回条目进不了新鲜桶（2026-09 实测 0/3→2/3 带日期）
+        include_published_date: true,
       }),
       signal: ctrl.signal,
     });
