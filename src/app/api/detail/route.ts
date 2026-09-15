@@ -13,6 +13,7 @@ import { queryPlan, sanitizeEntityCandidate } from "../../../lib/relevance";
 import {
   dropNonEvidenceParts,
   heuristicAngleKeywords,
+  heuristicAngleQuotes,
   looksLikeAngleSentence,
   normalizeAngleKeywords,
   stripAngleLead,
@@ -817,6 +818,8 @@ export async function POST(req: NextRequest) {
       ? heuristicAngleKeywords(topic).filter((kw) => !callerKws.includes(kw))
       : [];
     const angleKws: string[] = [...callerKws, ...heuristicKws].slice(0, 5);
+    // 引号长金句原句（13-40 字）：只进搜索 fan-out 做强制裸搜，不进事实门证据词。
+    const angleQuotePhrases = !entity ? heuristicAngleQuotes(topic) : [];
     // 这句话题是不是「角度/选题描述句」（"XX向：…，可做一期…"）。检索用文本剥掉
     // 角度标签壳，排序/成文仍用原句（长句里的描述词是 rankLoose 的精准锚点）。
     const angleLike = !entity && looksLikeAngleSentence(topic);
@@ -1102,6 +1105,8 @@ export async function POST(req: NextRequest) {
         pushUniq(kw);
         if (entity) pushUniq(`${entity} ${kw}`);
       }
+      // 长金句原句强制裸搜（再长也不切词——切了必零召回），搜索/爬虫两路都会带上。
+      for (const qp of angleQuotePhrases) pushUniq(qp);
     }
     // 角度大白话短词 → 平台内短查询：微博/贴吧/知乎的站内搜索对长查询几乎零召回，
     // "zont1x 颜值""zont1x 帅"这种 2-3 词短查询才能搜出粉丝讨论帖。
@@ -1562,12 +1567,29 @@ export async function POST(req: NextRequest) {
       .map((x) => x.h);
     const reportSeen = new Set<string>();
     const reportHits: SearchHit[] = [];
-    for (const h of [...groundHits, ...reportRanked]) {
-      if (reportSeen.has(h.url)) continue;
+    const pushReport = (h: SearchHit): boolean => {
+      if (reportSeen.has(h.url)) return reportHits.length >= 8;
       reportSeen.add(h.url);
       reportHits.push(h);
-      if (reportHits.length >= 8) break;
+      return reportHits.length >= 8;
+    };
+    for (const h of groundHits) if (pushReport(h)) break;
+    // 全新造词救援：纯按总分取前 8 会被"实名锚点泛资料"（如人物发家史）刷屏，
+    // 挤掉用户真正问的角度锚点（如灰产视角）。给【每个用户原句锚点词】保 2 个名额，
+    // 从已过闸的排序池里按分挑完整命中（≥3 分）的篇，不足再用全局排序补齐。
+    if (blindAnchorKws.length) {
+      for (const anc of blindAnchorKws) {
+        if (reportHits.length >= 8) break;
+        let n = 0;
+        for (const h of reportRanked) {
+          if (reportSeen.has(h.url)) continue;
+          if (relevanceScore(`${h.title} ${h.content}`, anc) < 3) continue;
+          if (pushReport(h)) break;
+          if (++n >= 2) break;
+        }
+      }
     }
+    for (const h of reportRanked) if (pushReport(h)) break;
 
     // 事实门（2026-09 根治，取代旧的前置 LLM 措辞猜测门）。
     // 唯一口径：【检索之后】看有没有召回与话题强相关的事实，与领域/措辞/语言/长短无关：

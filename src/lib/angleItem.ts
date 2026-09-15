@@ -96,21 +96,82 @@ export function looksLikeAngleSentence(t: string): boolean {
   return false;
 }
 
+// 长引号金句（13-40 字，如「经典我一个bl妹都想反bl了」）超短时引擎照样零召回，
+// 但句中【中英混写原子词】（bl妹/反bl）是圈内唯一可索引形态。抽取规则保持内容中立：
+// 取拉丁字母串本身，以及与它【紧贴的单个汉字】（功能字"个/的/我"等不贴）。
+const QUOTE_ATTACH_STOP = new Set(
+  "的了个是我你他她它们都也就还在有和与或而被把让向往对从到啊吗呢吧呀嘛呗哦哈"
+    .split("")
+);
+const LATIN_RUN_RE = /[a-zA-Z][a-zA-Z0-9]*/g;
+function quoteAtoms(phrase: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (w: string) => {
+    const k = w.toLowerCase();
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(w);
+  };
+  let m: RegExpExecArray | null;
+  while ((m = LATIN_RUN_RE.exec(phrase))) {
+    const w = m[0];
+    if (w.length >= 2) push(w);
+    const i = m.index;
+    const before = phrase[i - 1];
+    const after = phrase[i + w.length];
+    if (before && /[一-龥]/.test(before) && !QUOTE_ATTACH_STOP.has(before))
+      push(before + w);
+    if (after && /[一-龥]/.test(after) && !QUOTE_ATTACH_STOP.has(after))
+      push(w + after);
+  }
+  return out;
+}
+
 // 无契约的旧角度行兜底：收集全部引号短语（含 2-3 字圈内黑话原词）。
 // 单个短黑话当整句查询鉴别力不足，但两个以上并列就是强证据组合，交后端逐词 fan-out。
+// 长金句（13-40 字）整句不具鉴别力，只抽其中中英混写原子词当原词；整句裸搜由
+// heuristicAngleQuotes 另走搜索通道，不进证据词。
 export function heuristicAngleKeywords(topic: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
-  const re = /[「“"『]([^」”"』]{2,20})[」”"』]/g;
+  const add = (kw: string) => {
+    if (kw.length < 2 || kw.length > 12) return;
+    const key = kw.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(kw);
+  };
+  const re = /[「“"『]([^」”"』]{2,40})[」”"』]/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(topic || ""))) {
     const kw = cleanKw(m[1]);
-    if (kw.length < 2 || kw.length > 12) continue;
+    if (kw.length < 2) continue;
+    if (kw.length <= 12) {
+      add(kw);
+    } else {
+      for (const a of quoteAtoms(kw)) add(a);
+    }
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
+// 引号里的长金句原句（13-40 字）：专供【强制裸搜】，不作为事实门证据词
+//（整句不会被任何页面逐字转载，当证据词只会关门）。
+export function heuristicAngleQuotes(topic: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const re = /[「“"『]([^」”"』]{13,40})[」”"』]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(topic || ""))) {
+    const kw = cleanKw(m[1]);
+    if (kw.length < 13) continue;
     const key = kw.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(kw);
-    if (out.length >= 5) break;
+    if (out.length >= 3) break;
   }
   return out;
 }

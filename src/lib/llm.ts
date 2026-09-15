@@ -171,6 +171,10 @@ export function llmErrorAction(
 // 统一的 OpenAI 兼容 /chat/completions 调用：返回解析后的 JSON。
 // 非 2xx 直接抛带分类（LlmApiError.kind）的错误，路由层据此给前端返回「配 Key / 去充值」引导，
 // 而不是让用户面对 "Authentica... is not valid JSON" 这种莫名其妙的报错。
+// 免费通道实测会间歇性返回【请求体被截断】式 400（JSON hex 转义不完整，列号随机）、
+// 502/503、429——同一请求重发即成功。这类瞬时错误做最多 3 次短退避重试；
+// Key 无效/欠费类错误不重试，立刻冒泡给用户明确引导。
+const RETRYABLE_KINDS = new Set<LlmErrorKind>(["upstream", "rate_limited"]);
 export async function llmChatJson(
   cfg: LlmConfig,
   payload: Record<string, unknown>,
@@ -179,31 +183,56 @@ export async function llmChatJson(
   if (!cfg.apiKey) {
     throw new LlmApiError("no_key", "未配置 API Key");
   }
-  const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${cfg.apiKey}`,
-    },
-    body: JSON.stringify({ model: cfg.model, ...payload }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    const kind = classifyLlmStatus(res.status, text);
-    throw new LlmApiError(
-      kind,
-      `模型服务返回 ${res.status}：${text.slice(0, 300)}`,
-      res.status,
-      text.slice(0, 500)
-    );
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${cfg.apiKey}`,
+        },
+        body: JSON.stringify({ model: cfg.model, ...payload }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        const kind = classifyLlmStatus(res.status, text);
+        console.error(
+          `[llm-upstream] ${res.status} kind=${kind} attempt=${attempt + 1} model=${cfg.model} body=${text.slice(0, 400)}`
+        );
+        throw new LlmApiError(
+          kind,
+          `模型服务返回 ${res.status}：${text.slice(0, 300)}`,
+          res.status,
+          text.slice(0, 500)
+        );
+      }
+      try {
+        return JSON.parse(text);
+      } catch {
+        console.error(
+          `[llm-upstream] non-json attempt=${attempt + 1} model=${cfg.model} body=${text.slice(0, 400)}`
+        );
+        throw new LlmApiError(
+          "upstream",
+          `模型服务返回了无法解析的内容：${text.slice(0, 200)}`
+        );
+      }
+    } catch (e) {
+      lastErr = e;
+      // 不可恢复的错误立即抛出
+      if (
+        e instanceof LlmApiError &&
+        (e.kind === "invalid_key" || e.kind === "no_balance" || e.kind === "no_key")
+      ) {
+        throw e;
+      }
+      const retryable =
+        !(e instanceof LlmApiError) || RETRYABLE_KINDS.has(e.kind);
+      if (!retryable || attempt === 2) throw e;
+      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+    }
   }
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new LlmApiError(
-      "upstream",
-      `模型服务返回了无法解析的内容：${text.slice(0, 200)}`
-    );
-  }
+  throw lastErr;
 }
