@@ -1044,18 +1044,38 @@ export async function POST(req: NextRequest) {
         }
       };
       for (const q of blindExpand?.queries || []) pushBare(q);
-      // 保留原大小写：下方 relevanceScore 证据匹配对拉丁词大小写敏感（A11≠a11）
-      blindAnchorKws = (blindExpand?.keywords || [])
-        .map((k0) => String(k0 || "").replace(/\s+/g, "").trim())
-        .filter(
-          (k) =>
-            k.length >= 2 &&
-            k.length <= 12 &&
-            (/[一-鿿]/.test(k) || /[a-zA-Z]{2,}/.test(k))
-        )
-        .slice(0, 5);
-      // 锚点短词本身也是最精准的裸搜索（孙宇晨/灰产这种 2-4 字原子词站内召回最稳）
-      for (const k of blindAnchorKws) pushBare(k, 12);
+      // 锚点原子词【必须逐字出现在用户原句里】：模型只负责把长句切成原子词，但实测它会
+      // 自作主张加原句没有的相关词（本案原句写"灰产"，模型 keywords 给的却是"割韭菜/
+      // 空气币/镰刀"）——非原句词一律不收，扩展词不能反身自证。候选同时取 keywords 与
+      // queries 切词（实测模型会把原句原子词放进 query 却漏进 keywords，如本轮的"灰产"）。
+      // 保留原大小写：relevanceScore 拉丁词大小写敏感（A11≠a11）。
+      const blindTopicNorm = cleanTopic(stripAngleLead(topic))
+        .replace(/\s+/g, "")
+        .toLowerCase();
+      const blindRawToks = [
+        ...(blindExpand?.keywords || []),
+        ...(blindExpand?.queries || []).flatMap((q) =>
+          String(q || "").split(
+            /[\s，,。.！!？?；;：:、「」【】《》""''（）()\[\]…—~·/]+
+          )
+        ),
+      ];
+      const seenAnchor = new Set<string>();
+      for (const t0 of blindRawToks) {
+        const k = String(t0 || "").replace(/\s+/g, "").trim();
+        if (k.length < 2 || k.length > 8) continue;
+        if (!/[一-鿿]/.test(k) && !/[a-zA-Z]{2,}/.test(k)) continue;
+        // 过元话语/平台名/日期清洗（可做/一期/微博/9月13日 这类不是证据）
+        if (dropNonEvidenceParts([k]).length === 0) continue;
+        const kk = k.toLowerCase();
+        if (!blindTopicNorm.includes(kk)) continue; // 非用户原句逐字原词，不收
+        if (seenAnchor.has(kk)) continue;
+        seenAnchor.add(kk);
+        blindAnchorKws.push(k);
+        // 锚点原子词本身也是最精准的裸搜索（孙宇晨/灰产这种 2-4 字原词站内召回最稳）
+        pushBare(k, 12);
+        if (blindAnchorKws.length >= 6) break;
+      }
     }
     // 显式/启发式角度原词 → 逐词 fan-out（2026-09）：圈内黑话/外号（2-3 字）的站内
     // 唯一索引形态就是原词本身——被主体名或大白话词一修饰，微博/贴吧/知乎站内搜索
