@@ -948,6 +948,14 @@ export async function POST(req: NextRequest) {
       ]);
       allHits = [...g0, ...v0];
     }
+    // 全新造词检测（2026-09 灰灰男案）：速览角度（无平台=从主体速览方向区点入，区别于
+    // 热榜单条）的主体若是刚冒头的新外号/新梗，引擎对【主体裸词】零结果，上面强制
+    // 「以主体开头」的扩展查询也全部零召回——角度句里真正有索引的实名锚点（事件当事人、
+    // 关联实体）被这个没人写过的词一起陪葬，事实门只能回"没找到"。救援在下方扩展收口后。
+    const entityBlind =
+      !platform && entityFromCaller && entityHits.length === 0;
+    // 救援取出的实名锚点短词（来自用户自己的角度句，非系统自造，可当事实门强证据词）
+    let blindAnchorKws: string[] = [];
     // 主体名兜底提取（2026-09 泛化）：详情入口没带 entity 时（从聊天/热榜直接进来的
     // 条目只有"主体结构回复"才带主体名），长句查询歪打正着召回的帖子里反复出现真实主体名
     // ——提取它，改写 entity/core 并补「主体」+「主体×角度短句」两路检索：讨论该主体
@@ -1004,6 +1012,43 @@ export async function POST(req: NextRequest) {
     }
     if (entity && expandQs.length === 0) {
       expandQs = [`${entity} 近况`, `${entity} 评价`, `${entity} 争议`];
+    }
+    // 全新造词救援（接上：entityBlind）：以【角度句模式、不带主体】重做一次语义拆解——
+    // prompt 会从用户自己这句话里提取真正可检索的人物/事件名与原子短语（如"孙宇晨/灰产/
+    // 暴富"），且不再强制"以主体开头"。这些裸查询随下方统一 fan-out 搜索补召回；短词留作
+    // 事实门强证据词（来源是用户原句而非系统扩展自造，不构成循环论证）。
+    if (entityBlind) {
+      const blindExpand = await expandQueries(
+        topic,
+        cleanTopic(stripAngleLead(topic)),
+        "",
+        { angleLike: true }
+      ).catch(() => null);
+      const have = new Set(
+        expandQs.map((q) => q.replace(/\s+/g, "").toLowerCase())
+      );
+      const pushBare = (q0: unknown, max = 14) => {
+        const x = String(q0 || "").replace(/\s+/g, " ").trim().slice(0, max);
+        if (!x) return;
+        const k = x.replace(/\s+/g, "").toLowerCase();
+        if (!have.has(k)) {
+          have.add(k);
+          expandQs.push(x);
+        }
+      };
+      for (const q of blindExpand?.queries || []) pushBare(q);
+      // 保留原大小写：下方 relevanceScore 证据匹配对拉丁词大小写敏感（A11≠a11）
+      blindAnchorKws = (blindExpand?.keywords || [])
+        .map((k0) => String(k0 || "").replace(/\s+/g, "").trim())
+        .filter(
+          (k) =>
+            k.length >= 2 &&
+            k.length <= 12 &&
+            (/[一-鿿]/.test(k) || /[a-zA-Z]{2,}/.test(k))
+        )
+        .slice(0, 5);
+      // 锚点短词本身也是最精准的裸搜索（孙宇晨/灰产这种 2-4 字原子词站内召回最稳）
+      for (const k of blindAnchorKws) pushBare(k, 12);
     }
     // 显式/启发式角度原词 → 逐词 fan-out（2026-09）：圈内黑话/外号（2-3 字）的站内
     // 唯一索引形态就是原词本身——被主体名或大白话词一修饰，微博/贴吧/知乎站内搜索
@@ -1393,6 +1438,37 @@ export async function POST(req: NextRequest) {
         )
       );
     };
+    // 强证据词（2026-09，定义前置供取材池名字闸辅路与事实门共用同一口径）：
+    //  ①角度契约/引号原词（angleKws，用户/模型从原句摘的原词）；
+    //  ②全新造词救援从【用户角度句】里取出的实名锚点（blindAnchorKws，非系统自造）；
+    //  ③都没有则剥功能词，并额外去掉平台名/选题元话语/日期残片。剥完为空→无强证据。
+    const callerEvidenceQs = Array.from(
+      new Set(
+        [...angleKws, ...blindAnchorKws].map((q) => q.trim()).filter(Boolean)
+      )
+    );
+    const strictQs = callerEvidenceQs.length
+      ? callerEvidenceQs
+      : dropNonEvidenceParts(factContentParts(cleanTopic(searchTopic)));
+    // 多原词覆盖度证据（与事实门 docEvidence 同模型）：mx=该篇对最强单个原词的分，
+    // cov=完整命中（≥3分≈完整命中一个 2-3 字词）的不同原词数。
+    const angleDocEvidence = (h: SearchHit) => {
+      const txt = `${h.title} ${h.content}`;
+      let mx = 0;
+      let cov = 0;
+      for (const q of strictQs) {
+        const s = relevanceScore(txt, q);
+        if (s >= 3) cov += 1;
+        if (s > mx) mx = s;
+      }
+      return { mx, cov };
+    };
+    // 名字闸辅路入池条件（比事实门放行略宽，给互证留第二篇）：mx≥4 或 一篇覆盖≥2 原词。
+    const angleBypassAdmit = (h: SearchHit) => {
+      if (!entity || strictQs.length === 0) return false;
+      const e = angleDocEvidence(h);
+      return e.mx >= 4 || e.cov >= 2;
+    };
     // 强相关闸（2026-09 第二轮·取材池侧）：rankLoose 对【展示列表】有 t1 强相关分层
     // （文章必须提到主体名），但取材池此前只要求"相关分>0 或 标题/URL 提到主体"——
     // 角度词撞上同名品牌时（"361度"梗 vs 361°运动品牌），天猫店/品牌官网/同名商品帖
@@ -1400,6 +1476,8 @@ export async function POST(req: NextRequest) {
     // 素材事实出现"官方旗舰店正常运营"这种噪声；② 被下方"一致性补链"绕过 rankLoose
     // 分层直接塞进参考网站。这里与 rankLoose 口径对齐：
     // · 文章：有主体时必须（标题+摘要+URL）提到主体名——与文章路 t1 完全一致；
+    //   辅路（灰灰男案）：全新造词零索引时，不逐字含主体名的文章凭【用户原句强证据词】
+    //   多原词覆盖入池——蹭词品牌帖不可能在单篇内完整命中两个独立原词，防串台不降级；
     // · 近半年视频：提到主体名，或角度整句（≥4字）命中——B 站 UGC 常用昵称/梗不写真名，
     //   但只靠数字品牌词散命中的电商/开箱视频仍挡在外面（与视频路 t1 同口径）。
     const mentionsEntity = (h: SearchHit) =>
@@ -1407,7 +1485,8 @@ export async function POST(req: NextRequest) {
       `${h.title} ${h.content} ${h.url}`
         .toLowerCase()
         .includes(entity.toLowerCase());
-    const articleGate = (h: SearchHit) => !entity || mentionsEntity(h);
+    const articleGate = (h: SearchHit) =>
+      !entity || mentionsEntity(h) || angleBypassAdmit(h);
     const videoGate = (h: SearchHit) => {
       if (!entity) return true;
       if (mentionsEntity(h)) return true;
@@ -1441,7 +1520,8 @@ export async function POST(req: NextRequest) {
             : 0),
       }))
       .filter(
-        (x) => x.s > 0 || mentionsEntity(x.h) // 提到主体名 = 相关，保底进取材池
+        // 提到主体名 = 相关，保底进取材池；名字闸辅路证据篇同口径保底
+        (x) => x.s > 0 || mentionsEntity(x.h) || angleBypassAdmit(x.h)
       )
       .sort((a, b) => b.s - a.s)
       .map((x) => x.h);
@@ -1457,22 +1537,18 @@ export async function POST(req: NextRequest) {
     // 事实门（2026-09 根治，取代旧的前置 LLM 措辞猜测门）。
     // 唯一口径：【检索之后】看有没有召回与话题强相关的事实，与领域/措辞/语言/长短无关：
     //  A. 有平台核心来源（groundHits）或原报道链接 → 应用内热榜单条点入，事实确定，放行；
-    //  B. 调用方【明确给了】讨论主体（entityFromCaller）且取材池非空 → articleGate 已保证
-    //     每篇都提到主体名，放行；guessEntity 猜出来的主体不算——它可能是从跑偏召回里
-    //     猜中的随机新闻人物，拿它给同一批召回自证是循环论证；
+    //  B. 调用方【明确给了】讨论主体（entityFromCaller）且取材池里【至少一篇逐字提到
+    //     主体名】→ 名字闸已保证该篇锚定主体，放行；guessEntity 猜出来的主体不算——
+    //     它可能是从跑偏召回里猜中的随机新闻人物，拿它给同一批召回自证是循环论证；
+    //     全新造词救援（没有一篇含主体名）不走此路，必须落到 C 的多原词互证；
     //  C. 无结构上下文（裸话题/切入句，含猜测主体落空的情况）→ 要求确定性强相关证据：
     //     至少 1 篇对原词打分≥5（完整命中长专名）或一篇覆盖≥2 个不同原词（多个圈内黑话
     //     同时完整命中），且总共≥2 篇达到 mx≥4/cov≥2 互证。"那个事后来怎么样了""你引用了
     //     哪些网站"剥完没有鉴别性实词，必然落到这里被闸住，与问的是哪个领域无关。
     // 闸住时不调用生成模型、不硬答一篇，直接告诉用户没查到、建议补具体主体。
-    // 强证据词只取自【用户原始话题/前端显式契约】（不碰 LLM 的 expandQs——扩展词是系统
-    // 为放宽召回造的，造出"后续进展"这类泛词不能反过来证明用户问的就是某件事）：
-    //  ①优先用角度检索词（〔搜：…〕契约词与引号原词都是用户/模型从原句里摘的原词）；
-    //  ②否则剥功能词，并额外去掉平台名/选题元话语/日期残片（见 dropNonEvidenceParts）；
-    // 剥完为空 → 直接闸住。
-    const strictQs = angleKws.length
-      ? angleKws
-      : dropNonEvidenceParts(factContentParts(cleanTopic(searchTopic)));
+    // 强证据词口径（strictQs 已前置到取材池定义）：只取自【用户原始输入】——角度契约
+    // 原词、引号原词、全新造词救援从用户角度句里取出的实名锚点；都没有才剥功能词。
+    // 绝不碰 LLM 自由扩展的 expandQs——那是系统造的宽召回词，不能反过来自证。
     // 证据模型（2026-09 覆盖度升级）：旧口径"取单词条最高分、要求 1 篇≥5"对 2-3 字
     // 圈内黑话结构性关门——3 字词满分才 4（2gram×2 + 完整 2），永远过不了 5。
     // 单看散命中又会被"称呼/提问"这类泛词骗开。故按【多原词覆盖】判强证据：
@@ -1480,22 +1556,13 @@ export async function POST(req: NextRequest) {
     // · cov：该篇命中（≥3 分≈完整命中一个 2-3 字词）的不同原词数——同一篇同时
     //   完整命中两个圈内词，随机蹭词帖做不到，等价于强证据；
     // 强证据篇 mx≥5 或 cov≥2；至少 1 篇强证据 + 总共 2 篇（mx≥4 或 cov≥2）互证。
-    const docEvidence = (h: SearchHit) => {
-      const txt = `${h.title} ${h.content}`;
-      let mx = 0;
-      let cov = 0;
-      for (const q of strictQs) {
-        const s = relevanceScore(txt, q);
-        if (s >= 3) cov += 1;
-        if (s > mx) mx = s;
-      }
-      return { mx, cov };
-    };
+    // 含主体名的篇沿用旧口径（baseScore 角度分）；名字闸辅路救回的篇（全新造词救援）
+    // 必须用用户原句证据词覆盖度自证，不能靠"调用方给了主体"豁免。
     const factEvidences = reportHits.map((h) => ({
       h,
-      ...(entityFromCaller
+      ...(entityFromCaller && mentionsEntity(h)
         ? { mx: baseScore(h), cov: 0 }
-        : docEvidence(h)),
+        : angleDocEvidence(h)),
     }));
     const factScores = factEvidences.map((e) => e.mx);
     const factStrong =
@@ -1505,10 +1572,13 @@ export async function POST(req: NextRequest) {
     //  A. 应用内结构化入口：热榜单条点入（带 platform 且有平台核心来源）或带原报道链接 →
     //     事实确定，放行。注意无 platform 时 groundHits 只是 SearXNG 召回的前两条、
     //     不是"平台核心来源"，不能作为证据——否则任何垃圾检索都能靠它自证放行。
+    //  B. 调用方【明确给了】主体，且取材池至少一篇逐字提到主体名（旧口径原样）；
+    //     全靠名字闸辅路救回的篇不算确定事实，必须走 C 多原词互证。
+    const poolHasEntityHit = reportHits.some(mentionsEntity);
     const factEnough =
       (!!platform && groundHits.length > 0) ||
       !!originUrl ||
-      (entityFromCaller && reportHits.length > 0) ||
+      (entityFromCaller && poolHasEntityHit && reportHits.length > 0) ||
       factStrong;
     if (!factEnough) {
       return NextResponse.json({

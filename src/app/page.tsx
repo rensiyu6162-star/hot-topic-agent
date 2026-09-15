@@ -530,7 +530,12 @@ function WheelColumn({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const n = items.length;
-  const rendered = loop ? [...items, ...items, ...items] : items;
+  // 非循环列首尾各垫一个等高空白行：否则第一项滚不到中心选中带（滚动位置最小为 0，
+  // 第一项只能停在顶部），实测表现就是年份列选不到当前年（2026 永远停在最上面一格，
+  // 能落进选中带的最靠前一项变成 2027）。null = 占位空白行。
+  const rendered: (string | null)[] = loop
+    ? [...items, ...items, ...items]
+    : [null, ...items, null];
   // value 变化 → 滚动定位（滚动中上报的 value 与当前位置一致，自动跳过，不干扰滚动）
   useEffect(() => {
     const el = ref.current;
@@ -567,18 +572,23 @@ function WheelColumn({
         onScroll={onScroll}
         className="no-scrollbar relative z-10 h-[108px] overflow-y-scroll snap-y snap-mandatory"
       >
-        {rendered.map((label, i) => (
-          <div
-            key={i}
-            className={`flex h-9 snap-center items-center justify-center text-sm transition-colors ${
-              i === (loop ? n : 0) + value
-                ? "font-medium text-gray-900"
-                : "text-gray-400"
-            }`}
-          >
-            {label}
-          </div>
-        ))}
+        {rendered.map((label, i) =>
+          label === null ? (
+            <div key={i} className="h-9 shrink-0" />
+          ) : (
+            <div
+              key={i}
+              className={`flex h-9 snap-center items-center justify-center text-sm transition-colors ${
+                // 非循环列前面有一个占位行，高亮下标整体 +1
+                i === (loop ? n + value : value + 1)
+                  ? "font-medium text-gray-900"
+                  : "text-gray-400"
+              }`}
+            >
+              {label}
+            </div>
+          )
+        )}
       </div>
       <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-9 bg-gradient-to-b from-white to-transparent" />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 h-9 bg-gradient-to-t from-white to-transparent" />
@@ -3225,22 +3235,30 @@ export default function Home() {
         (curSection !== "" ||
           /^[^｜|【\n]{1,10}[｜|]/.test(stripLead(line)) ||
           capsuleChip);
-      // 建议条目（方向区"- "行 / 带【领域】胶囊的行）：与热搜条目走同一条
-      // 查看详情→口播素材/关联文章→生成脚本 链路；检索词优先取行内引号里的主题，否则整句
-      const suggestionItem = !looksLikeHotItem && (dirBullet || capsuleChip);
+      // 行尾检索契约（2026-09）：角度行尾的 〔搜：词1 词2 词3〕 是模型按 prompt 输出的
+      // 机器标记，正常正文不会出现。模型实测约 1/3 概率漏写「直接相关的切入」小节标题，
+      // dirSection 状态机进不去——故先在原文上探一遍契约，作为第三条建议条目识别路径。
+      const hasAngleContract = parseAngleMarker(line).keywords.length > 0;
+      // 建议条目（方向区"- "行 / 带【领域】胶囊的行 / 带〔搜：〕契约的角度行）：与热搜条目走
+      // 同一条 查看详情→口播素材/关联文章→生成脚本 链路；检索词优先取契约词，否则整句
+      const suggestionItem =
+        !looksLikeHotItem &&
+        (dirBullet || capsuleChip || hasAngleContract);
       // 方向区条目行的 emoji（🔥💰⚡ 等）是模型惯性加的装饰，与领域胶囊混在一起显得莫名其妙——
-      // 渲染前确定性剥掉（提示词禁令对模型抑制不稳定，前端兜底；只剥方向区条目，热搜条目标题不动）
-      const strippedLine = dirBullet
-        ? line
-            .replace(
-              /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}\u{20E3}]/gu,
-              ""
-            )
-            .replace(/[ \t]{2,}/g, " ")
-            .trimEnd()
-        : line;
-      // 显式检索契约（2026-09）：角度行尾的 〔搜：词1 词2 词3〕 是给检索用的机器标记，
-      // 绝不能显示给用户，也不能带着它去检索——这里剥成展示文本 + 检索词两部分。
+      // 渲染前确定性剥掉（提示词禁令对模型抑制不稳定，前端兜底；漏标题的契约孤儿条目同属角度行，
+      // 一并剥；热搜条目标题不动）
+      const strippedLine =
+        dirBullet || hasAngleContract
+          ? line
+              .replace(
+                /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}\u{20E3}]/gu,
+                ""
+              )
+              .replace(/[ \t]{2,}/g, " ")
+              .trimEnd()
+          : line;
+      // 显式检索契约（2026-09）：〔搜：…〕绝不能显示给用户，也不能带着它去检索——
+      // 这里剥成展示文本 + 检索词两部分。
       const angleMarker = parseAngleMarker(strippedLine);
       const displayLine = angleMarker.display;
       let tagTopic = "";
