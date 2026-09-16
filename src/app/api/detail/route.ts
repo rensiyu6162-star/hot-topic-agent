@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
+  commercialRescue,
   searxSearch as searxSearchLib,
   searxSearchUnion,
 } from "../../../lib/searx";
@@ -1632,11 +1633,123 @@ export async function POST(req: NextRequest) {
     //  B. 调用方【明确给了】主体，且取材池至少一篇逐字提到主体名（旧口径原样）；
     //     全靠名字闸辅路救回的篇不算确定事实，必须走 C 多原词互证。
     const poolHasEntityHit = reportHits.some(mentionsEntity);
-    const factEnough =
+    let factEnough =
       (!!platform && groundHits.length > 0) ||
       !!originUrl ||
       (entityFromCaller && poolHasEntityHit && reportHits.length > 0) ||
       factStrong;
+    // 质量型零召回商业救援（2026-09）：免费源扇出十几路、候选上百条却无一篇过硬证据时
+    // （典型：对口原帖在免费引擎索引里漂移消失，占位全是内容农场/词典/泛主题页），用商业
+    // 源（Tavily→博查）对用户原句再补一轮。救援条目走与免费源【完全相同】的取材口径和
+    // 事实门——过得了才放行，过不了照样告知没查到，绝不因为花了钱就降低证据标准。
+    // 触发逻辑见 searx.ts commercialRescue（无日调用上限，同查询 10 分钟缓存去重）。
+    if (!factEnough) {
+      // 商业源对中文长句的召回随查询形态差异极大（2026-09 实测同一金句：整句有时只回
+      // 泛主题小说页，词组合却能命中对口讨论；不同形态各自捞到不同原文页）。故查询列表
+      // 全部由用户原句机械生成、不带任何领域词表：
+      //   ①完整剥壳原句（≤40字）；②引号原词（若有）；
+      //   ③鉴别原词的【两两组合】与【全组合】——strictQs 来自用户原句剥功能词，非系统自造。
+      const rescueBase: string[] = [
+        core.slice(0, 40),
+        ...angleQuotePhrases.map((q) => q.slice(0, 40)),
+      ];
+      if (strictQs.length >= 2) {
+        rescueBase.push(strictQs.slice(0, 2).join(" "));
+        rescueBase.push(strictQs.slice(0, 3).join(" "));
+      }
+      const rescueQueries = Array.from(new Set(rescueBase.filter(Boolean))).slice(0, 3);
+      // 把商业条目按与免费源完全相同的口径入池，并用同一道事实门重算（不新增豁免通道）。
+      // 返回 true=事实门通过。两轮调用（basic→advanced）共用，避免口径漂移。
+      const applyRescue = (
+        hits: SearchHit[],
+        tag: string,
+        calls: number,
+        via: string
+      ): { enough: boolean; near: boolean } => {
+        if (hits.length === 0) {
+          if (calls > 0)
+            console.warn(
+              `[commercial-rescue] ${tag} 无新增 calls=${calls} topic=${topic.slice(0, 30)}`
+            );
+          return { enough: false, near: false };
+        }
+        const oldUrls = new Set(allHits.map((h) => h.url));
+        const fresh = hits.filter((h) => !oldUrls.has(h.url));
+        allHits.push(...fresh);
+        const rescueRanked = fresh
+          .map((h) => ({
+            h,
+            s: Math.max(
+              ...(reportAngleQs.length ? reportAngleQs : [core]).map((q) =>
+                relevanceScore(`${h.title} ${h.content}`, q)
+              )
+            ),
+          }))
+          .filter((x) => x.s > 0 || mentionsEntity(x.h) || angleBypassAdmit(x.h))
+          .sort((a, b) => b.s - a.s)
+          .map((x) => x.h);
+        for (const h of rescueRanked) if (pushReport(h)) break;
+        const reEvidences = reportHits.map((h) => ({
+          h,
+          ...(entityFromCaller && mentionsEntity(h)
+            ? { mx: baseScore(h), cov: 0 }
+            : angleDocEvidence(h)),
+        }));
+        factScores.length = 0;
+        factScores.push(...reEvidences.map((e) => e.mx));
+        const strongish = reEvidences.filter(
+          (e) => e.mx >= 4 || e.cov >= 2
+        ).length;
+        const strongNow =
+          strictQs.length > 0 &&
+          reEvidences.some((e) => e.mx >= 5 || e.cov >= 2) &&
+          strongish >= 2;
+        const enoughNow =
+          (!!platform && groundHits.length > 0) ||
+          !!originUrl ||
+          (entityFromCaller &&
+            reportHits.some(mentionsEntity) &&
+            reportHits.length > 0) ||
+          strongNow;
+        // near=已有至少一篇强相关（mx≥4/cov≥2）但互证不足——这种才值得花 advanced
+        // 去补第二篇；一篇像样的都没有（元话语/裸指代类）升级也是白烧，直接闸。
+        const near = strongish >= 1;
+        console.warn(
+          `[commercial-rescue] ${tag} calls=${calls} via=${via || "-"} 新增=${fresh.length} 入池=${rescueRanked.length} 强相关=${strongish} 过门=${enoughNow} topic=${topic.slice(0, 30)}`
+        );
+        return { enough: enoughNow, near };
+      };
+      // 第一轮：多形态 basic（1 credit/查询，缓存命中不计）
+      const rescue = await commercialRescue(
+        rescueQueries,
+        { limit: 10, safesearch: 0 },
+        "basic"
+      );
+      const r1 = applyRescue(rescue.hits, "basic", rescue.calls, rescue.via);
+      if (r1.enough) {
+        factEnough = true;
+      } else if (
+        rescue.calls > 0 &&
+        r1.near &&
+        (process.env.TAVILY_API_KEY || "").trim() &&
+        rescueQueries.length > 0
+      ) {
+        // 第二轮：basic 已有强相关篇但互证不足（商业源自身当次结果波动时常见），对完整
+        // 原句升级 advanced 深搜一次（2 credits，独立缓存键）补互证篇；仍只认真实过门。
+        const rescueAdv = await commercialRescue(
+          [rescueQueries[0]],
+          { limit: 10, safesearch: 0 },
+          "advanced"
+        );
+        const r2 = applyRescue(
+          rescueAdv.hits,
+          "advanced",
+          rescueAdv.calls,
+          rescueAdv.via
+        );
+        if (r2.enough) factEnough = true;
+      }
+    }
     if (!factEnough) {
       return NextResponse.json({
         needClarify: true,

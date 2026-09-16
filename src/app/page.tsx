@@ -14,13 +14,65 @@ import {
   stripAngleLead,
 } from "../lib/angleItem";
 
+// 联想增强·方向卡（两步交互）：服务端发散+预取证后下发的三类方向，
+// 用户勾选数据/先例轴、单选成因方向，确认后才带 plan+selection 真正写稿。
+type AssocStance = {
+  id: string;
+  stance: string;
+  reason: string;
+  gate?: "pass" | "fail";
+  evidenceCount?: number;
+  sampleTitles?: string[];
+  evidenceSamples?: { title: string; url: string }[];
+};
+type AssocAxis = {
+  id: string;
+  kind: "data" | "precedent" | "explanation";
+  axis: string;
+  reason: string;
+  gate?: "pass" | "fail";
+  evidenceCount?: number;
+  sampleTitles?: string[];
+  evidenceSamples?: { title: string; url: string }[];
+  queries?: string[];
+  stances?: AssocStance[];
+};
+// 方向卡生成成稿所需的请求参数快照（卡片回点时不依赖脚本弹窗是否还开着）
+type AssocGenCtx = {
+  topic: string;
+  platform: string;
+  report: string;
+  entity: string;
+  sites: DetailData["sites"];
+  type: string;
+  script: string;
+  embed: string;
+  memes: string[];
+  facts: string[];
+  duration: string;
+  wordRange: string;
+  domain: string;
+};
+type AssocCardState = {
+  status: "asking" | "writing" | "done" | "skipped";
+  plan: AssocAxis[];
+  selectedAxes: string[];
+  stanceByAxis: Record<string, string>;
+  ctx: AssocGenCtx;
+  // propose 阶段服务端发的一次性取证缓存 token；确认写稿时原样带回，
+  // 让写稿复用用户当时看到的同一批已验真证据
+  proposalToken?: string;
+};
+
 interface Message {
   role: "user" | "assistant";
   content: string;
   toolLogs?: string[];
   emptyNote?: string;
   domains?: string[]; // 服务端判定的本轮实际生效领域（抓热点时回填到气泡；普通聊天无）
-  kind?: "script"; // 生成脚本产出的消息：按纯文本渲染，不当作热点条目解析出「查看详情」
+  kind?: "script" | "assoc-card"; // 生成脚本产出的消息：按纯文本渲染，不当作热点条目解析出「查看详情」；assoc-card=联想方向确认卡
+  // 联想方向卡的交互状态（仅 kind==="assoc-card"）
+  assocCard?: AssocCardState;
   failed?: boolean; // 请求超时/网络失败：居中提示卡 + 重试按钮，不按普通回答气泡渲染
   // 「重试后仍失败」的反馈戳：每次重试失败 +1；卡片 key 带它强制重挂载，
   // 保证红色抖动动画【每次】都能重播（布尔 class 在同节点增删时浏览器可能不重播动画）
@@ -218,16 +270,18 @@ const RefSitesBlock = ({
   onOpenApp,
   defaultOpen = false,
   preview,
+  label = "参考网站",
 }: {
   sites: RefSite[];
   onOpenApp: (url: string) => void;
   defaultOpen?: boolean; // 详情面板默认直接展开；聊天消息里的参考块默认折叠
   preview?: number; // 展开态默认只露前几条，右侧「展开更多」看全部
+  label?: string; // 观点稿联想证据复用本块时叫「联想依据」
 }) => {
   return (
     <RefCollapsible
       icon="🔗"
-      label="参考网站"
+      label={label}
       count={sites.length}
       defaultOpen={defaultOpen}
       preview={preview}
@@ -302,6 +356,250 @@ const RefVideosBlock = ({
         </a>
       ))}
     </RefCollapsible>
+  );
+};
+
+// ============ 联想增强·方向确认卡（两步交互的第二步 UI）============
+// 样式对齐产品里的"提问卡"：一个问题、几个可点选项、推荐项打标。
+// 内容全部来自服务端针对本题现场发散+预取证，组件本身不含任何领域词。
+const ASSOC_KIND_META: Record<AssocAxis["kind"], { icon: string; label: string }> = {
+  data: { icon: "📊", label: "数据背景" },
+  precedent: { icon: "⚖️", label: "同类先例" },
+  explanation: { icon: "🧩", label: "成因剖析" },
+};
+
+// 方向卡上的证据验真折叠：默认收起一行，展开后列全部标题（可点外链核实）
+const AssocEvidence = ({ samples }: { samples?: { title: string; url: string }[] }) => {
+  const [open, setOpen] = useState(false);
+  const list = (samples || []).filter((s) => s && s.url);
+  if (!list.length) return null;
+  return (
+    <div className="mt-1" onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-[10px] text-indigo-500 hover:underline"
+      >
+        {open ? "收起证据 ▴" : `展开看全部证据（${list.length} 条，可点链接核实）▾`}
+      </button>
+      {open && (
+        <div className="mt-1 flex flex-col gap-1 rounded-lg bg-white/70 p-2">
+          {list.map((s, i) => (
+            <a
+              key={i}
+              href={s.url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-baseline gap-1 break-words text-[11px] leading-relaxed text-indigo-500 hover:underline"
+            >
+              <SiteIcon url={s.url} />
+              <span>{s.title}</span>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const AssocCardView = ({
+  card,
+  onToggleAxis,
+  onPickStance,
+  onConfirm,
+  onSkip,
+}: {
+  card: AssocCardState;
+  onToggleAxis: (axisId: string) => void;
+  onPickStance: (axisId: string, stanceId: string | null) => void;
+  onConfirm: () => void;
+  onSkip: () => void;
+}) => {
+  const { status, plan, selectedAxes, stanceByAxis } = card;
+  const expl = plan.find((a) => a.kind === "explanation");
+  const explChosen = expl ? selectedAxes.includes(expl.id) : false;
+  const canConfirm =
+    status === "asking" &&
+    (selectedAxes.some((id) => {
+      const a = plan.find((x) => x.id === id);
+      return a && a.kind !== "explanation";
+    }) ||
+      (explChosen && expl ? !!stanceByAxis[expl.id] : false));
+
+  if (status === "writing") {
+    return (
+      <div className="flex items-center gap-2 text-sm text-gray-500">
+        <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+        正在按你选的方向联网取证写稿，大约 10 秒…
+      </div>
+    );
+  }
+  if (status === "done" || status === "skipped") {
+    const picked = plan.filter((a) => selectedAxes.includes(a.id));
+    return (
+      <div className="text-xs text-gray-400">
+        {status === "done" ? (
+          <>
+            ✅ 已按所选方向生成（见下方稿子）：
+            {picked.map((a) => {
+              const st = a.kind === "explanation" && a.stances
+                ? a.stances.find((s) => s.id === stanceByAxis[a.id])?.stance
+                : null;
+              return (
+                <span key={a.id} className="ml-1 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-200 px-2 py-0.5">
+                  {ASSOC_KIND_META[a.kind].label}
+                  {st ? `·${st}` : ""}
+                </span>
+              );
+            })}
+          </>
+        ) : (
+          "已跳过联想，按普通稿生成。"
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="text-sm">
+      <div className="mb-1 font-medium text-gray-800">🧭 联想方向确认</div>
+      <div className="mb-3 text-xs text-gray-400">
+        下面每个方向都刚联网验过证，查不到可靠资料的已置灰。勾掉你不要的，再选一个成因方向。
+      </div>
+
+      {/* 第一问：数据/先例轴多选 */}
+      {plan.some((a) => a.kind !== "explanation") && (
+        <div className="mb-3">
+          <div className="mb-1.5 text-xs font-medium text-gray-600">
+            这题可以往这几个方向联想，要带上哪些？（可多选）
+          </div>
+          <div className="flex flex-col gap-2">
+            {plan
+              .filter((a) => a.kind !== "explanation")
+              .map((a) => {
+                const pass = a.gate === "pass";
+                const on = selectedAxes.includes(a.id);
+                return (
+                  <div
+                    key={a.id}
+                    role={pass ? "button" : undefined}
+                    tabIndex={pass ? 0 : undefined}
+                    onClick={() => pass && onToggleAxis(a.id)}
+                    onKeyDown={(e) => {
+                      if (pass && (e.key === "Enter" || e.key === " ")) {
+                        e.preventDefault();
+                        onToggleAxis(a.id);
+                      }
+                    }}
+                    className={`rounded-xl border px-3 py-2 text-left transition ${
+                      !pass
+                        ? "cursor-not-allowed border-gray-200 bg-gray-50 opacity-60"
+                        : on
+                        ? "cursor-pointer border-indigo-400 bg-indigo-50 ring-1 ring-indigo-300"
+                        : "cursor-pointer border-gray-200 bg-white hover:border-indigo-200"
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span>{ASSOC_KIND_META[a.kind].icon}</span>
+                      <span className="text-[13px] font-medium text-gray-800">{a.axis}</span>
+                      {!pass && (
+                        <span className="ml-auto text-[10px] text-gray-400">未查到可靠资料</span>
+                      )}
+                      {pass && (
+                        <span
+                          className={`ml-auto flex h-4 w-4 items-center justify-center rounded-full border text-[10px] ${
+                            on ? "border-indigo-500 bg-indigo-500 text-white" : "border-gray-300 text-transparent"
+                          }`}
+                        >
+                          ✓
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 text-xs text-gray-500">{a.reason}</div>
+                    {pass && <AssocEvidence samples={a.evidenceSamples} />}
+                  </div>
+                );
+              })}
+          </div>
+        </div>
+      )}
+
+      {/* 第二问：成因方向单选 */}
+      {expl && (
+        <div className="mb-3">
+          <div className="mb-1.5 text-xs font-medium text-gray-600">
+            成因往哪个方向深挖？（单选；其余方向会作为反方被回应）
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {(expl.stances || []).map((s) => {
+              const pass = s.gate === "pass";
+              const on = explChosen && stanceByAxis[expl.id] === s.id;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  disabled={!pass}
+                  title={s.reason}
+                  onClick={() => onPickStance(expl.id, on ? null : s.id)}
+                  className={`max-w-full rounded-full border px-3 py-1.5 text-xs transition ${
+                    !pass
+                      ? "cursor-not-allowed border-gray-200 bg-gray-50 text-gray-400 line-through"
+                      : on
+                      ? "border-indigo-500 bg-indigo-500 text-white"
+                      : "border-gray-300 bg-white text-gray-700 hover:border-indigo-300"
+                  }`}
+                >
+                  {s.stance}
+                  {!pass ? "（无可靠资料）" : ""}
+                </button>
+              );
+            })}
+            <button
+              key="__none"
+              type="button"
+              onClick={() => onPickStance(expl.id, null)}
+              className={`rounded-full border px-3 py-1.5 text-xs transition ${
+                !explChosen
+                  ? "border-indigo-500 bg-indigo-500 text-white"
+                  : "border-gray-300 bg-white text-gray-500 hover:border-indigo-300"
+              }`}
+            >
+              不做成因剖析
+            </button>
+          </div>
+          {explChosen &&
+            (() => {
+              const s = expl.stances?.find((x) => x.id === stanceByAxis[expl.id]);
+              return s ? (
+                <div className="mt-1.5 rounded-lg bg-indigo-50/60 px-2.5 py-1.5 text-[11px] leading-relaxed text-gray-500">
+                  {s.reason}
+                  <AssocEvidence samples={s.evidenceSamples} />
+                </div>
+              ) : null;
+            })()}
+        </div>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={!canConfirm}
+          onClick={onConfirm}
+          className={`rounded-full px-4 py-2 text-xs font-medium text-white transition ${
+            canConfirm ? "bg-gradient-to-r from-indigo-500 to-violet-500" : "cursor-not-allowed bg-gray-300"
+          }`}
+        >
+          按所选方向写稿
+        </button>
+        <button
+          type="button"
+          onClick={onSkip}
+          className="rounded-full border border-gray-300 px-4 py-2 text-xs text-gray-500 hover:bg-gray-50"
+        >
+          不联想，直接写
+        </button>
+      </div>
+    </div>
   );
 };
 
@@ -1034,6 +1332,9 @@ export default function Home() {
   const [polishing, setPolishing] = useState(false); // 润色梗概进行中
   const [scriptGenerating, setScriptGenerating] = useState(false); // 一键生成进行中
   const [durationIdx, setDurationIdx] = useState(2); // 脚本时长档位，默认 1分30秒（index 2）
+  // 联想增强手动档（默认关）：观点稿开启后先联网为更大的结构议题取证再写，多约5-10秒；
+  // 只影响生成请求，服务端仅对观点稿生效。
+  const [assocMode, setAssocMode] = useState(false);
   const [multiLoading, setMultiLoading] = useState(false); // 一稿多发生成中
   const [multiPack, setMultiPack] = useState<MultiPack | null>(null); // 一稿多发结果
   // 梗概框填入反馈：从素材卡点时间线/角度填入时，输入框柔和高亮一次（纯前端提示，
@@ -1172,39 +1473,330 @@ export default function Home() {
     }
   };
 
-  // 一键生成脚本：综合类型 + 脚本框内容 + 待植入元素 + 热点事件与报道，生成最终脚本并作为一条消息插入对话
-  const generateScript = async () => {
-    if (!scriptModal || scriptGenerating) return;
-    const { topic, platform, report } = scriptModal;
-    const type = scriptType;
-    setScriptGenerating(true);
+  // 一键生成脚本：综合类型 + 脚本框内容 + 待植入元素 + 热点事件与报道，生成最终脚本并作为一条消息插入对话。
+  // 联想增强开启时是两步：先 propose-associations 拿方向卡 → 用户勾选 → confirmAssoc 才真正写稿。
+  const buildScriptRequestBody = (
+    extra: Record<string, unknown>,
+    ctx: AssocGenCtx
+  ) => ({
+    action: "generate",
+    topic: ctx.topic,
+    platform: ctx.platform,
+    report: ctx.report,
+    entity: ctx.entity,
+    sites: ctx.sites,
+    type: ctx.type,
+    script: ctx.script,
+    embed: ctx.embed,
+    memes: ctx.memes,
+    facts: ctx.facts,
+    duration: ctx.duration,
+    wordRange: ctx.wordRange,
+    domain: ctx.domain,
+    llm: llmPayload(),
+    ...extra,
+  });
+
+  const currentAssocCtx = (): AssocGenCtx | null => {
+    if (!scriptModal) return null;
+    return {
+      topic: scriptModal.topic,
+      platform: scriptModal.platform,
+      report: scriptModal.report,
+      entity: scriptModal.entity || "",
+      sites: scriptModal.sites ?? [],
+      type: scriptType,
+      script: scriptPlot,
+      embed: scriptEmbed,
+      memes: scriptModal.material?.memes ?? [],
+      facts: scriptModal.material?.facts ?? [],
+      duration: DURATION_STEPS[durationIdx].label,
+      wordRange: DURATION_STEPS[durationIdx].words,
+      domain: selectedDomains.join("、"),
+    };
+  };
+
+  const mapAssocSites = (data: any): RefSite[] =>
+    Array.isArray(data?.associationSources)
+      ? data.associationSources
+          .filter(
+            (x: unknown): x is Record<string, unknown> =>
+              !!x && typeof x === "object" && typeof (x as any).url === "string"
+          )
+          .map((x: Record<string, unknown>) => ({
+            url: String(x.url),
+            title: String(x.title || x.url),
+          }))
+      : [];
+
+  // 把成稿响应落成一条 script 消息（llmError/失败由调用方处理）
+  const pushScriptMessage = (data: any, ctx: AssocGenCtx, withAssoc: boolean) => {
+    const script = (data?.script && String(data.script).trim()) || "脚本生成失败，请稍后重试。";
+    const downgradeNote = data?.downgrade ? `⚠️ ${String(data.downgrade)}\n\n` : "";
+    const assocSites = withAssoc ? mapAssocSites(data) : [];
+    setActiveMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        kind: "script",
+        content: `🎬 视频脚本（${ctx.type}${assocSites.length ? "·联想增强" : ""}）｜${ctx.topic}\n\n${downgradeNote}${script}`,
+        ...(assocSites.length ? { refs: { sites: assocSites, videos: [] } } : {}),
+      },
+    ]);
+  };
+
+  const updateAssocCard = (msgIdx: number, patch: Partial<AssocCardState>) => {
+    setActiveMessages((prev) =>
+      prev.map((m, i) =>
+        i === msgIdx && m.kind === "assoc-card" && m.assocCard
+          ? { ...m, assocCard: { ...m.assocCard, ...patch } }
+          : m
+      )
+    );
+  };
+
+  const toggleAssocAxis = (msgIdx: number, axisId: string) => {
+    const msg = messages[msgIdx];
+    const card = msg?.assocCard;
+    if (!card || card.status !== "asking") return;
+    const axis = card.plan.find((a) => a.id === axisId);
+    if (!axis || axis.gate !== "pass") return;
+    const has = card.selectedAxes.includes(axisId);
+    const selectedAxes = has
+      ? card.selectedAxes.filter((x) => x !== axisId)
+      : [...card.selectedAxes, axisId];
+    // 摘掉成因轴时同时清掉它的方向选择
+    const stanceByAxis = { ...card.stanceByAxis };
+    if (has && axis.kind === "explanation") delete stanceByAxis[axisId];
+    updateAssocCard(msgIdx, { selectedAxes, stanceByAxis });
+  };
+
+  const pickAssocStance = (msgIdx: number, axisId: string, stanceId: string | null) => {
+    const msg = messages[msgIdx];
+    const card = msg?.assocCard;
+    if (!card || card.status !== "asking") return;
+    const selectedAxes = card.selectedAxes.includes(axisId)
+      ? card.selectedAxes
+      : [...card.selectedAxes, axisId];
+    const stanceByAxis = { ...card.stanceByAxis };
+    if (stanceId) stanceByAxis[axisId] = stanceId;
+    else delete stanceByAxis[axisId];
+    // 选了"不做成因剖析"：成因轴留在选择里会导致 generate 缺 stanceId 而空跑，
+    // 后端语义=不选该轴；这里直接把成因轴从轴选择里摘掉（其它轴不受影响）。
+    if (!stanceId) {
+      const idx = selectedAxes.indexOf(axisId);
+      if (idx >= 0) selectedAxes.splice(idx, 1);
+    }
+    updateAssocCard(msgIdx, { selectedAxes, stanceByAxis });
+  };
+
+  // 方向卡确认：按勾选带 plan+selection 真正写稿
+  const confirmAssoc = async (msgIdx: number) => {
+    const msg = messages[msgIdx];
+    const card = msg?.assocCard;
+    if (!card || card.status !== "asking") return;
+    const hasNonExpl = card.selectedAxes.some((id) => {
+      const a = card.plan.find((x) => x.id === id);
+      return a && a.kind !== "explanation";
+    });
+    const expl = card.plan.find((a) => a.kind === "explanation");
+    const hasStance = expl ? !!card.stanceByAxis[expl.id] : false;
+    if (!hasNonExpl && !hasStance) return;
+    updateAssocCard(msgIdx, { status: "writing" });
     try {
       const res = await fetch("/api/script", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "generate",
-          topic,
-          platform,
-          report,
-          entity: scriptModal.entity || "",
-          sites: scriptModal.sites ?? [],
-          type,
-          script: scriptPlot,
-          embed: scriptEmbed,
-          // 详情面板抓到的热梗/事实自动带上（服务端标注"选用不硬塞"）；
-          // 用户手动点chip植入走 embed，两边不冲突
-          memes: scriptModal.material?.memes ?? [],
-          facts: scriptModal.material?.facts ?? [],
-          duration: DURATION_STEPS[durationIdx].label,
-          wordRange: DURATION_STEPS[durationIdx].words,
-          domain: selectedDomains.join("、"),
-          llm: llmPayload(),
-        }),
+        body: JSON.stringify(
+          buildScriptRequestBody(
+            {
+              associate: true,
+              associationPlan: card.plan,
+              associationSelection: {
+                axisIds: card.selectedAxes,
+                stanceByAxis: card.stanceByAxis,
+              },
+              // 取回 propose 阶段缓存的已验真证据；服务端缓存丢失时自动回退重新取证
+              ...(card.proposalToken ? { associationToken: card.proposalToken } : {}),
+            },
+            card.ctx
+          )
+        ),
       });
       const data = await res.json();
-      // Key 缺失/无效/欠费：在对话区插引导卡（配置 Key / 充值直达按钮），
-      // 保留脚本弹窗——用户配好 Key / 充值后可直接再点「生成」，不用重走选题
+      if (data?.llmError) {
+        updateAssocCard(msgIdx, { status: "asking" });
+        setActiveMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            failed: true,
+            kind: "script",
+            content: data.llmError.message,
+            llmError: data.llmError,
+          },
+        ]);
+        return;
+      }
+      pushScriptMessage(data, card.ctx, true);
+      updateAssocCard(msgIdx, { status: "done" });
+    } catch (e) {
+      console.error("[ui] 联想写稿请求失败:", e);
+      updateAssocCard(msgIdx, { status: "asking" });
+      setActiveMessages((prev) => [
+        ...prev,
+        { role: "assistant", kind: "script", content: "脚本生成失败，请稍后重试。" },
+      ]);
+    }
+  };
+
+  // 方向卡跳过：按普通稿生成
+  const skipAssoc = async (msgIdx: number) => {
+    const msg = messages[msgIdx];
+    const card = msg?.assocCard;
+    if (!card || card.status !== "asking") return;
+    updateAssocCard(msgIdx, { status: "writing" });
+    try {
+      const res = await fetch("/api/script", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildScriptRequestBody({ associate: false }, card.ctx)),
+      });
+      const data = await res.json();
+      if (data?.llmError) {
+        updateAssocCard(msgIdx, { status: "asking" });
+        setActiveMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            failed: true,
+            kind: "script",
+            content: data.llmError.message,
+            llmError: data.llmError,
+          },
+        ]);
+        return;
+      }
+      pushScriptMessage(data, card.ctx, false);
+      updateAssocCard(msgIdx, { status: "skipped" });
+    } catch (e) {
+      console.error("[ui] 跳过联想写稿失败:", e);
+      updateAssocCard(msgIdx, { status: "asking" });
+      setActiveMessages((prev) => [
+        ...prev,
+        { role: "assistant", kind: "script", content: "脚本生成失败，请稍后重试。" },
+      ]);
+    }
+  };
+
+  const generateScript = async () => {
+    if (!scriptModal || scriptGenerating) return;
+    const ctx = currentAssocCtx();
+    if (!ctx) return;
+    setScriptGenerating(true);
+    try {
+      // ── 联想模式·第一步：先发散+预取证，弹方向卡；非观点稿/无可用方向则静默转普通稿 ──
+      if (assocMode && ctx.type === "口播稿") {
+        const propRes = await fetch("/api/script", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "propose-associations",
+            topic: ctx.topic,
+            platform: ctx.platform,
+            report: ctx.report,
+            entity: ctx.entity,
+            sites: ctx.sites,
+            type: ctx.type,
+            script: ctx.script,
+            embed: ctx.embed,
+            memes: ctx.memes,
+            facts: ctx.facts,
+            domain: ctx.domain,
+            llm: llmPayload(),
+          }),
+        });
+        const propData = await propRes.json().catch(() => null);
+        const rawAxes: AssocAxis[] = Array.isArray(propData?.axes) ? propData.axes : [];
+        const usable = rawAxes.filter(
+          (a) =>
+            a.gate === "pass" &&
+            (a.kind === "explanation"
+              ? (a.stances || []).some((s) => s.gate === "pass")
+              : true)
+        );
+        if (!propData?.llmError && usable.length > 0) {
+          // 默认勾选所有过闸的数据/先例轴；成因轴默认不勾（要用户亲自选方向）
+          const selectedAxes = usable
+            .filter((a) => a.kind !== "explanation")
+            .map((a) => a.id);
+          setActiveMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              kind: "assoc-card",
+              content: "",
+              assocCard: {
+                status: "asking",
+                plan: rawAxes,
+                selectedAxes,
+                stanceByAxis: {},
+                ctx,
+                ...(typeof propData.proposalToken === "string" && propData.proposalToken
+                  ? { proposalToken: propData.proposalToken }
+                  : {}),
+              },
+            },
+          ]);
+          setScriptModal(null);
+          return;
+        }
+        // Key 配置问题：照旧插引导卡（保留弹窗）
+        if (propData?.llmError) {
+          setActiveMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              failed: true,
+              kind: "script",
+              content: propData.llmError.message,
+              llmError: propData.llmError,
+            },
+          ]);
+          return;
+        }
+        // 非观点稿或没有任何过闸方向：静默落普通生成（不带 associate，不重复烧发散）
+        const res = await fetch("/api/script", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildScriptRequestBody({ associate: false }, ctx)),
+        });
+        const data = await res.json();
+        if (data?.llmError) {
+          setActiveMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              failed: true,
+              kind: "script",
+              content: data.llmError.message,
+              llmError: data.llmError,
+            },
+          ]);
+          return;
+        }
+        pushScriptMessage(data, ctx, false);
+        setScriptModal(null);
+        return;
+      }
+
+      // ── 普通流（联想关 / 非口播稿）──
+      const res = await fetch("/api/script", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildScriptRequestBody({ associate: assocMode }, ctx)),
+      });
+      const data = await res.json();
       if (data?.llmError) {
         setActiveMessages((prev) => [
           ...prev,
@@ -1218,17 +1810,7 @@ export default function Home() {
         ]);
         return;
       }
-      const script = (data?.script && String(data.script).trim()) || "脚本生成失败，请稍后重试。";
-      // 素材量撑不住所选时长时后端自动降档，把原因摆在成稿最前面（不替用户假装长稿）
-      const downgradeNote = data?.downgrade ? `⚠️ ${String(data.downgrade)}\n\n` : "";
-      setActiveMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          kind: "script",
-          content: `🎬 视频脚本（${type}）｜${topic}\n\n${downgradeNote}${script}`,
-        },
-      ]);
+      pushScriptMessage(data, ctx, assocMode);
       setScriptModal(null);
     } catch (e) {
       console.error("[ui] 视频脚本生成请求失败:", e);
@@ -4116,6 +4698,33 @@ export default function Home() {
                 <span>5分钟</span>
               </div>
             </div>
+            {/* 写法：就事论事（默认）/ 联想增强（观点稿先联网为更大的结构议题取证再写） */}
+            <div className="space-y-1">
+              <label className="text-sm font-medium text-gray-700">写法</label>
+              <div className="flex gap-2">
+                {([
+                  { v: false as const, t: "就事论事" },
+                  { v: true as const, t: "联想增强" },
+                ]).map((o) => (
+                  <button
+                    key={String(o.v)}
+                    onClick={() => setAssocMode(o.v)}
+                    className={`px-4 py-1 rounded-lg border text-sm transition ${
+                      assocMode === o.v
+                        ? "border-indigo-400 bg-indigo-50 text-indigo-600 font-medium"
+                        : "border-gray-200 text-gray-600 hover:border-indigo-300"
+                    }`}
+                  >
+                    {o.t}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] leading-snug text-gray-400">
+                {assocMode
+                  ? "生成前先弹方向卡：可联想同类事件、统计数据和几派成因解释，每个方向都联网验过证据、你勾选后才写，多约10秒；仅观点稿生效，查不到证据的方向会置灰，依据列在稿下。"
+                  : "只围绕这件事本身写，速度最快。"}
+              </p>
+            </div>
             {/* SCRIPT_MODAL_REST */}
 
             {/* 梗概（选填）+ 润色梗概 */}
@@ -4349,7 +4958,11 @@ export default function Home() {
                 {scriptGenerating && (
                   <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M21 12a9 9 0 1 1-9-9" /></svg>
                 )}
-                {scriptGenerating ? "生成中…" : "一键生成脚本"}
+                {scriptGenerating
+                  ? assocMode
+                    ? "联想方向发散中…"
+                    : "生成中…"
+                  : "一键生成脚本"}
               </button>
               </div>
             </div>
@@ -5535,9 +6148,27 @@ export default function Home() {
                     )}
                     <div className={selectMode ? "pointer-events-none" : ""}>
                       {msg.role === "assistant" && !isWelcome ? (
-                        msg.kind === "script" ? (
+                        msg.kind === "assoc-card" && msg.assocCard ? (
+                          <AssocCardView
+                            card={msg.assocCard}
+                            onToggleAxis={(axisId) => toggleAssocAxis(i, axisId)}
+                            onPickStance={(axisId, stanceId) => pickAssocStance(i, axisId, stanceId)}
+                            onConfirm={() => confirmAssoc(i)}
+                            onSkip={() => skipAssoc(i)}
+                          />
+                        ) : msg.kind === "script" ? (
                           <div className="whitespace-pre-wrap leading-relaxed">
                             {cleanMarkdown(msg.content)}
+                            {/* 联想增强的取证来源：默认折叠，点开才看链接（与单主题参考块同口径） */}
+                            {msg.refs?.sites && msg.refs.sites.length > 0 && (
+                              <div className="mt-2.5 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs">
+                                <RefSitesBlock
+                                  sites={msg.refs.sites}
+                                  onOpenApp={(u) => openPlatformUrl(u)}
+                                  label="联想依据"
+                                />
+                              </div>
+                            )}
                           </div>
                         ) : (
                           renderAssistantContent(msg.content, i, msg.refs)

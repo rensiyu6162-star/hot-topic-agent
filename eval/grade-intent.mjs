@@ -23,7 +23,7 @@
 // 【禁止】搬进生产 prompt 当规则词表。
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 const KEY = process.env.OPENAI_API_KEY;
@@ -39,7 +39,7 @@ const MIN_MODE = 0.85;
 const MIN_SLOT = 0.9;
 
 // 与生产 DEFAULT_DOMAINS 同源（系统内置 10 领域）
-const UNIVERSE = [
+export const UNIVERSE = [
   "情感两性", "职场成长", "财经理财", "健康养生", "育儿教育",
   "社会热点", "历史文化", "影视娱乐", "科技互联网", "法制普法",
 ];
@@ -54,7 +54,7 @@ const EX_EVENT = "【主体速览】某商场店员与顾客冲突事件：网�
 const EX_POLICY = "【主体速览】育儿补贴新政：多省对三孩家庭每月发放补贴，细则各地不同。";
 
 // t=本轮原话；exp=期望 intent；turn/ex=上文结构与节选；mode/sub/domains/qualifier=可选槽位断言
-const CASES = [
+export const CASES = [
   // ---------- hot：要今天的榜单数据 ----------
   { id: "hot-1", t: "帮我抓今日热点", exp: "hot" },
   { id: "hot-2", t: "今天有啥可写的？", exp: "hot" },
@@ -172,6 +172,11 @@ function norm(s) {
   return String(s || "").trim().toLowerCase().replace(/\s+/g, "");
 }
 
+// 仅在被 node 直接执行时跑门禁；被 import（如消融实验复用 CASES）时不开跑。
+const isMain =
+  !!process.argv[1] &&
+  pathToFileURL(process.argv[1]).href === import.meta.url;
+if (isMain)
 (async () => {
   if (!KEY) {
     console.error("缺少 OPENAI_API_KEY");

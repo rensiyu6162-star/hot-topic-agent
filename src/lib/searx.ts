@@ -50,6 +50,9 @@ export interface SearxOptions {
   timeRange?: "" | "day" | "week" | "month" | "year"; // 默认 ""（不限）
   dropWiki?: boolean; // 剔除搜索引擎自身页/topic 聚合页（百科保留，chat 事实核实用 true）
   timeoutMs?: number; // 默认 12000
+  // 只跑自建免费源、禁止任何商业 API 补位（Tavily/博查）。观点稿「联想取证」用：
+  // 联想是增值探索而非主事实链，没搜到证据宁可不联想，也不为每次发散烧商业额度。
+  noCommercial?: boolean;
 }
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
@@ -411,6 +414,11 @@ async function searxFetchOnce(
 // 单路 searxSearch 仍维持"0 条才兜"：救援切词会扇出多个查询，<3 即花钱会烧穿额度。
 const LOW_RECALL_WEB = 3;
 const LOW_RECALL_WEB_FILL = 6;
+
+// 权威/机构媒体域名白名单（模块级，union 分桶与联想取证闸门共用同一份口径，
+// 禁止两处各维护各的导致漂移）。
+export const AUTHORITY_HOST_RE =
+  /(^|\.)(gov\.cn|news\.cn|xinhuanet\.com|people\.com\.cn|people\.cn|cctv\.cn|cnr\.cn|gmw\.cn|chinanews\.com|thepaper\.cn|caixin\.com|cls\.cn|wallstreetcn\.com|yicai\.com|stcn\.com|guancha\.cn|pbc\.gov\.cn|baike\.baidu\.com|wikipedia\.org|baike\.so\.com)$/i;
 function commercialAllowed(): boolean {
   try {
     return getLlm().systemOwned === true;
@@ -421,7 +429,8 @@ function commercialAllowed(): boolean {
 
 async function tavilySearch(
   q: string,
-  o: Required<SearxOptions>
+  o: Required<SearxOptions>,
+  depth: "basic" | "advanced" = "basic"
 ): Promise<SearxHit[]> {
   const apiKey = (process.env.TAVILY_API_KEY || "").trim();
   const ctrl = new AbortController();
@@ -436,7 +445,8 @@ async function tavilySearch(
       body: JSON.stringify({
         query: q,
         max_results: Math.min(o.limit, 10),
-        search_depth: "basic",
+        // advanced 扣 2 credits、召回更深更稳；仅由 commercialRescue 在 basic 贫瘠时升级
+        search_depth: depth,
         topic: "general",
         // 免费、不额外扣 credit：不传时 published_date 恒为空，救回条目进不了新鲜桶（2026-09 实测 0/3→2/3 带日期）
         include_published_date: true,
@@ -537,6 +547,119 @@ async function commercialFallback(
   return { hits: [], via: "" };
 }
 
+// —— 质量型零召回商业救援（2026-09）——
+// 与上面数量型兜底（commercialFallback）的区别：
+//   数量型：免费源整站挂掉/网页桶 <3 条，且只对系统内部调用开放；
+//   质量型：免费源候选并不少（实测每路 16 条、扇出后上百候选），但没有一条能过调用方
+//           事实门——免费索引里对口原帖消失，占位的是内容农场/词典/泛主题页。2026-09
+//           小众金句题实测：SearXNG 全废，同一原句 Tavily 首条即对口原帖。
+// 是否放行由调用方原有的事实门决定，本函数【不放宽任何证据标准】，只负责补召回；
+// 补回来的条目过不了原门，调用方照样回"没查到"。
+// 不设日调用上限（2026-09 用户明确要求：需要时不许因为额度计数被拦住）；
+// 同查询 10 分钟内命中缓存不重复花钱——这是去重，不是限流。
+const rg = globalThis as unknown as {
+  __HT_SEARX_RESCUE_CACHE__?: Map<string, { at: number; hits: SearxHit[] }>;
+};
+const rescueCache = (rg.__HT_SEARX_RESCUE_CACHE__ ??= new Map());
+
+export interface CommercialRescueResult {
+  hits: SearxHit[];
+  via: string; // 实际取到结果的商业源（tavily / bocha / tavily+bocha）
+  calls: number; // 本轮真实商业 API 调用次数（缓存命中不计）
+}
+
+export async function commercialRescue(
+  queries: string[],
+  opts: Partial<SearxOptions> = {},
+  depth: "basic" | "advanced" = "basic"
+): Promise<CommercialRescueResult> {
+  const o: Required<SearxOptions> = {
+    limit: 10,
+    safesearch: 0,
+    category: "general",
+    timeRange: "",
+    dropWiki: false,
+    timeoutMs: 12000,
+    noCommercial: false,
+    ...opts,
+  };
+  // 最多 3 个不同查询：成本与召回的平衡，调用方负责把最有鉴别力的原句排在前面
+  const qs = Array.from(
+    new Set(queries.map((x) => x.trim()).filter(Boolean))
+  ).slice(0, 3);
+  const out: SearxHit[] = [];
+  const seen = new Set<string>();
+  const vias: string[] = [];
+  let calls = 0;
+
+  for (const q of qs) {
+    const key = `rescue:${depth === "advanced" ? "adv:" : ""}${q}`;
+    const cached = rescueCache.get(key);
+    let hits: SearxHit[] = [];
+    let via = "";
+    if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+      hits = cached.hits;
+      via = "cache";
+    } else {
+      // 顺序与 commercialFallback 一致：Tavily（免费档）非空即用，空了再博查（按量付费）
+      if ((process.env.TAVILY_API_KEY || "").trim()) {
+        // advanced 扣 2 credits，计数同步计 2
+        calls += depth === "advanced" ? 2 : 1;
+        try {
+          const h = await tavilySearch(q, o, depth);
+          if (h.length > 0) {
+            hits = h;
+            via = "tavily";
+          }
+        } catch (e) {
+          console.warn(
+            `[commercial-rescue] tavily 失败 q=${q.slice(0, 20)}: ${
+              (e as Error)?.message || e
+            }`
+          );
+        }
+      }
+      if (
+        hits.length === 0 &&
+        (process.env.BOCHA_API_KEY || "").trim()
+      ) {
+        calls += 1;
+        try {
+          const h = await bochaSearch(q, o);
+          if (h.length > 0) {
+            hits = h;
+            via = "bocha";
+          }
+        } catch (e) {
+          console.warn(
+            `[commercial-rescue] bocha 失败 q=${q.slice(0, 20)}: ${
+              (e as Error)?.message || e
+            }`
+          );
+        }
+      }
+      if (hits.length > 0) {
+        if (rescueCache.size >= CACHE_MAX) {
+          const oldest = rescueCache.keys().next().value;
+          if (oldest !== undefined) rescueCache.delete(oldest);
+        }
+        rescueCache.set(key, { at: Date.now(), hits });
+      }
+    }
+    if (via && via !== "cache") {
+      vias.push(
+        `${via}${via === "tavily" && depth === "advanced" ? "(adv)" : ""}`
+      );
+    }
+    for (const h of hits) {
+      if (seen.has(h.url)) continue;
+      seen.add(h.url);
+      out.push(h);
+    }
+  }
+  return { hits: out, via: Array.from(new Set(vias)).join("+"), calls };
+}
+
 export async function searxSearch(
   query: string,
   opts: SearxOptions = {}
@@ -549,11 +672,12 @@ export async function searxSearch(
     timeRange: "",
     dropWiki: false,
     timeoutMs: 12000,
+    noCommercial: false,
     ...opts,
   };
   if (!SEARXNG_URL || !q) return [];
 
-  const key = JSON.stringify([q, o.limit, o.safesearch, o.category, o.timeRange, o.dropWiki]);
+  const key = JSON.stringify([q, o.limit, o.safesearch, o.category, o.timeRange, o.dropWiki, o.noCommercial]);
   const cached = cache.get(key);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS)
     return reResolveCached(key, cached);
@@ -587,8 +711,11 @@ export async function searxSearch(
       console.warn(`[searx] 换词重试仍失败 q2=${q2}: ${secondErr}`);
     }
     if (hits.length === 0) {
-      // 免费源两路皆空：仅系统内部调用时用商业 API（Tavily 免费档→博查）兜一次
-      const fb = await commercialFallback(q2, o);
+      // 免费源两路皆空：仅系统内部调用时用商业 API（Tavily 免费档→博查）兜一次。
+      // noCommercial 调用方（联想取证）直接放弃，绝不烧商业额度。
+      const fb = o.noCommercial
+        ? { hits: [], via: "" }
+        : await commercialFallback(q2, o);
       if (fb.hits.length > 0) {
         hits = fb.hits;
         recordSearxHealth(
@@ -642,6 +769,7 @@ export async function searxSearchUnion(
     timeRange: "",
     dropWiki: false,
     timeoutMs: 12000,
+    noCommercial: false,
     ...opts,
   };
   if (!SEARXNG_URL || !q) return [];
@@ -659,7 +787,7 @@ export async function searxSearchUnion(
   const gateSubject = plan.main;
   // videos 路泛化词：去掉数字梗 token（见 videoQuery）
   const vWide = videoQuery(plan.main);
-  const key = JSON.stringify(["union", core, vWide, o.limit, o.safesearch, o.dropWiki]);
+  const key = JSON.stringify(["union", core, vWide, o.limit, o.safesearch, o.dropWiki, o.noCommercial]);
   const cached = cache.get(key);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS)
     return reResolveCached(key, cached);
@@ -749,8 +877,7 @@ export async function searxSearchUnion(
   //  ②仅修①后，近30天路返回的蹭词新闻（带近期日期）又把无日期的百度百科/央行定义/
   //    政府老政策文全部挤出——"什么是降准"这类概念问题最该给的恰恰是后者。故权威/
   //    参考源独立成桶、最高优先且封顶 6 条。
-  const AUTHORITY_HOST_RE_UNION =
-    /(^|\.)(gov\.cn|news\.cn|xinhuanet\.com|people\.com\.cn|people\.cn|cctv\.cn|cnr\.cn|gmw\.cn|chinanews\.com|thepaper\.cn|caixin\.com|cls\.cn|wallstreetcn\.com|yicai\.com|stcn\.com|guancha\.cn|pbc\.gov\.cn|baike\.baidu\.com|wikipedia\.org|baike\.so\.com)$/i;
+  const AUTHORITY_HOST_RE_UNION = AUTHORITY_HOST_RE;
   // 百科只是权威【候选】：单字/词义页（"降"/"董"/"广州市"）也挂 baike 域名，
   // 必须过裸主体词相关性门控才能进权威桶，不相关则降为普通网页兜底。
   const ENCYCLOPEDIA_HOST_RE_UNION =
@@ -854,7 +981,7 @@ export async function searxSearchUnion(
   // 套 bucketOne 归桶（权威站照样进权威桶），是补位不是替换；最多并入 6 条。
   const webCount = () =>
     authorityWeb.length + webFresh.length + webRest.length;
-  if (webCount() < LOW_RECALL_WEB) {
+  if (webCount() < LOW_RECALL_WEB && !o.noCommercial) {
     const webBefore = webCount();
     const fb = await commercialFallback(core, o);
     if (fb.hits.length > 0) {
